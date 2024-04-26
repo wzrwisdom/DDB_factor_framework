@@ -1,0 +1,26 @@
+def loadSnapshot(rootPath, dbName, tbName, startDate, endDate, threadNum, initDb=false, initTb=false){
+    // 该模板为用户导入一个csv文件
+    // 但数据库schema已被确定,请查看函数包CSVDataModule。
+    jobIdlist = []
+    
+    
+    // 创建数据库和分布式表
+    CSVDataModule::createDBAndTable(dbName, tbName, initDb, initTb, CSVDataModule::createDatabaseSnapshotAll, CSVDataModule::createTableSnapshotAll)
+    
+    // 获取所有导入数据文件
+    filePathList = CSVDataModule::renderFilePathListSnapshotAll(rootPath, startDate, endDate)
+
+    // 以threadNum切分任务
+    filePathListCutted = CSVDataModule::cutFilePathList(filePathList, threadNum)
+
+    // 提交批任务
+    for (filePathList in filePathListCutted){
+        jobId = CSVDataModule::submitDataLoadJob(dbName, tbName, filePathList, CSVDataModule::renderDateList(filePathList), CSVDataModule::renderSchemaCsvSnapshotAll, CSVDataModule::renderDateList, CSVDataModule::renderTransformedDataAll)
+        jobIdlist.append!(jobId)
+    }
+        
+    CSVDataModule::writeLogAndPrint("Server_S0001_FACPLF: All jobs submitted successfully.")
+
+    //返回任务ID为平台提供解析
+    return jobIdlist
+}

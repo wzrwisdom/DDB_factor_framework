@@ -1,0 +1,142 @@
+
+//alpha 1
+//rank(Ts_ArgMax(SignedPower((returns<0?stddev(returns,20):close), 2), 5))-0.5
+
+def Alpha1(close){
+    ts = mimax(pow(iif(ratios(close) - 1 < 0, mstd(ratios(close) - 1, 20), close), 2.0), 5)
+    return rowRank(X=ts, percent=true) - 0.5
+}
+
+
+
+//alpha 2
+//(-1 * correlation(rank(delta(log(volume), 2)), rank(((close - open) / open)), 6))
+
+def Alpha2(vol, close, open){
+    delta = log(vol) - log(mfirst(vol, 3))
+    rank1 = rowRank(delta, percent=true)
+    rank2 = rowRank((close - open) \ open, percent=true)
+    return -mcorr(rank1, rank2, 6)
+}
+
+
+
+//alpha 3
+//(-1 * correlation(rank(open), rank(volume), 10))
+
+def Alpha3(vol, open){
+    return -mcorr(rowRank(open, percent=true), rowRank(vol, percent=true), 10)
+}
+
+
+
+//alpha 4
+//(-1 * Ts_Rank(rank(low), 9))
+
+def Alpha4(low){
+    return -mrank(rowRank(low, percent=true), true, 9)
+}
+
+
+
+//alpha 5
+//(rank((open - (sum(vwap, 10) / 10))) * (-1 * abs(rank((close - vwap)))))
+
+def Alpha5(vwap, open, close){
+    rank1 = rowRank((open - (msum(vwap, 10) \ 10)), percent=true)
+    rank2 = rowRank((close - vwap), percent=true)
+    return rank1 * (-1 * abs(rank2))
+}
+
+
+
+//alpha 6
+//(-1 * correlation(open, volume, 10))
+
+def Alpha6(vol, open){
+    return -mcorr(open, vol, 10)
+}
+
+
+//alpha 7
+//((adv20 < volume) ? ((-1 * ts_rank(abs(delta(close, 7)), 60)) * sign(delta(close, 7))) : (-1 * 1))
+
+def Alpha7(vol, close){
+    delta = close - mfirst(close, 8)
+    return iif(mavg(vol, 20) < vol, -mrank(abs(delta), true, 60) * sign(delta), -1)
+}
+
+
+
+//alpha 8
+//(-1 * rank(((sum(open, 5) * sum(returns, 5)) - delay((sum(open, 5) * sum(returns, 5)), 10))))
+
+def Alpha8(open, close){
+    sums = msum(open, 5) * msum((ratios(close) - 1), 5)
+    return -rowRank((sums - mfirst(sums, 11)), percent=true)
+}
+
+
+
+//alpha 9
+// ((0 < ts_min(delta(close, 1), 5)) ? delta(close, 1) : ((ts_max(delta(close, 1), 5) < 0) ? delta(close, 1) : (-1 * delta(close, 1))))
+
+def Alpha9(close){
+    delta = close - mfirst(close, 2)
+    iffalse = iif(mmax(delta, 5) < 0, delta, -delta)
+    return iif(0 < mmin(delta, 5), delta, iffalse)
+}
+
+
+
+//alpha 10
+//rank(((0 < ts_min(delta(close, 1), 4)) ? delta(close, 1) : ((ts_max(delta(close, 1), 4) < 0) ? delta(close, 1) : (-1 * delta(close, 1)))))
+
+def Alpha10(close){
+    delta = close - mfirst(close, 2)
+    iffalse = iif(mmax(delta, 4) < 0, delta, -delta)
+    return rowRank(iif(0 < mmin(delta, 4), delta, iffalse), percent=true)
+}
+
+
+// ML prepare time-series data
+def prepareTSData(rawData){
+    colnames = `open`close`high`low`vol`vwap
+    // 检查rawData是否包含所需的列
+    for (i in colnames.join(`security_code`trade_time)){
+        if (! (i in columnNames(rawData))){
+            throw "error: rawData不包括列"+i
+        }
+    }
+    n_time = 9
+    metacodes = each(def(col, n):each(def(colname,x):unifiedExpr((sqlCol(colname, move{, x}), sqlCol(colname)),\),col,0..n), colnames, n_time)
+    colAlias = each(def(col, n):[col].append!(col+string(1..n)), colnames, n_time)
+    columns = sqlCol(columnNames(rawData)[:2])
+    for (i in 0..(metacodes.size()-1)){
+        for (icode in sqlColAlias(metacodes[i], colAlias[i])){
+            columns.append!(icode)
+        }
+    }
+    ret = sql(columns, rawData, groupby=sqlCol(`security_code), groupFlag=0, csort=sqlCol(`trade_time)).eval()
+    return ret
+}
+
+// Adaboost因子
+// 利用的特征包括t(-9~1) open,close,high,low,vol,vwap
+// 非面板数据
+
+def AdaboostAlpha(model_path, rawData){
+    ret = prepareTSData(rawData)    // 准备数据
+    model = loadModel(model_path)  // 加载本地模型
+    pred = predict(model, ret)     // 预测
+    return pred
+}
+
+
+
+def XGBoostAlpha(model_path, rawData){
+    ret = prepareTSData(rawData)[:, 2:] //准备数据，剔除掉security_code和trade_time列
+    model = xgboost::loadModel(model_path)  // 加载模型
+    pred = xgboost::predict(model, ret)
+    return pred
+}

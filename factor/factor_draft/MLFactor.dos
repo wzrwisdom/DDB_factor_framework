@@ -1,0 +1,41 @@
+// ML prepare time-series data
+def prepareTSData(rawData){
+    colnames = `open`close`high`low`vol`vwap
+    // 检查rawData是否包含所需的列
+    for (i in colnames.join(`security_code`trade_time)){
+        if (! (i in columnNames(rawData))){
+            throw "error: rawData不包括列"+i
+        }
+    }
+    n_time = 9
+    metacodes = each(def(col, n):each(def(colname,x):unifiedExpr((sqlCol(colname, move{, x}), sqlCol(colname)),\),col,0..n), colnames, n_time)
+    colAlias = each(def(col, n):[col].append!(col+string(1..n)), colnames, n_time)
+    columns = sqlCol(columnNames(rawData)[:2])
+    for (i in 0..(metacodes.size()-1)){
+        for (icode in sqlColAlias(metacodes[i], colAlias[i])){
+            columns.append!(icode)
+        }
+    }
+    ret = sql(columns, rawData, groupby=sqlCol(`security_code), groupFlag=0, csort=sqlCol(`trade_time)).eval()
+    return ret
+}
+
+// Adaboost因子
+// 利用的特征包括t(-9~1) open,close,high,low,vol,vwap
+// 非面板数据
+
+def AdaboostAlpha(model_path, rawData){
+    ret = prepareTSData(rawData)    // 准备数据
+    model = loadModel(model_path)  // 加载本地模型
+    pred = predict(model, ret)     // 预测
+    return pred
+}
+
+
+
+def XGBoostAlpha(model_path, rawData){
+    ret = prepareTSData(rawData)[:, 2:] //准备数据，剔除掉security_code和trade_time列
+    model = xgboost::loadModel(model_path)  // 加载模型
+    pred = xgboost::predict(model, ret)
+    return pred
+}

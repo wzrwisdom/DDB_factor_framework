@@ -1,0 +1,393 @@
+/**
+* This function writes the input log to a log file and prints it to the console.
+*
+* @param log: STRING, representing the log message to be written and printed.
+*/
+def writeLogAndPrint(log){
+    writeLog(log)
+    print(log)
+}
+
+
+/**
+* Load data from a CSV file into a DolphinDB table.
+* 
+* @param dbName: STRING, The name of the database where the table is located.
+* @param tbName: STRING, The name of the table to be loaded.
+* @param filePath: STRING VECTOR, The path of the CSV file to be loaded.
+* @param renderSchemaCsvFunc: FUNCTION, The function used to generate the schema of the CSV file.
+* @param renderDateListFunc: FUNCTION, The function used to generate a list of dates from the file path.
+* @param renderTransformedDataFunc: FUNCTION, The function used to transform the data before loading it into the table.
+*/
+def loadOneFile(dbName, tbName, filePath, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc){
+    day = renderDateListFunc(filePath)[0][0]
+    csvRows = extractTextSchema(filePath).rows()
+    givenRows = renderSchemaCsvFunc().rows()
+    writeLogAndPrint("file column num: " + csvRows + ", given columns: " + givenRows)
+    transformedData = ploadText(filePath, schema=renderSchemaCsvFunc())
+    renderTransformedDataFunc(dbName, tbName, transformedData)
+}
+
+/**
+* Aggregate original snapshot data into 1min-level data
+*/
+def doAggSnapshotOneMinute(dbName, tbName, dateStart, dateEnd, snapDbName, snapTbName, renderTransformedDataFunc){
+    // 根据原始3s快照信息聚合出 1min级K线图
+    tick_aggr = select first(last_price) as open, max(last_price) as high, min(last_price) as low, last(last_price) as close,
+    sum(deltas(total_volume_trade)) as volume, sum(deltas(total_value_trade))/pow(10,5) as amount, 
+    wavg(last_price, deltas(total_volume_trade))/pow(10,6) as vwap, last(offer_price)[0] as s1, last(bid_price)[0] as b1, (last(offer_price)[0]+last(bid_price)[0])/2 as bs_avg_price, double(sum(bid_volume) - sum(offer_volume))/(sum(bid_volume) + sum(offer_volume)) as wb, 1 as price_adj
+    from loadTable(snapDbName, snapTbName) 
+    where date(orig_time) >= dateStart and date(orig_time) <= dateEnd 
+    and (security_code not like "90%" and security_code not like "20%")
+    and ((time(orig_time) >= 09:30:00 && time(orig_time) <= 11:30:00) || (time(orig_time) >= 13:00:00 && time(orig_time) <= 15:00:00))
+    group by security_code, bar(orig_time, 1m) as trade_time;
+    
+    tick_aggr_ext = select security_code, trade_time, double(deltas(close)) / move(close, 1) as ret from tick_aggr
+    tick_aggr = lj(tick_aggr, tick_aggr_ext, `security_code`trade_time)
+    
+    renderTransformedDataFunc(dbName, tbName, tick_aggr)
+}
+
+
+/**
+* Aggregate original snapshot data into 5min-level data
+*/
+def doAggSnapshotFiveMinute(dbName, tbName, dateStart, dateEnd, snapDbName, snapTbName, renderTransformedDataFunc){
+    // 根据原始3s快照信息聚合出 5min级K线图
+    tick_aggr = select first(last_price) as open, max(last_price) as high, min(last_price) as low, last(last_price) as close,
+    sum(deltas(total_volume_trade)) as volume, sum(deltas(total_value_trade))/pow(10,5) as amount, 
+    wavg(last_price, deltas(total_volume_trade))/pow(10,6) as vwap, 
+    double(sum(bid_volume) - sum(offer_volume))/(sum(bid_volume) + sum(offer_volume)) as wb, 1 as price_adj
+    from loadTable(snapDbName, snapTbName) 
+    where date(orig_time) >= dateStart and date(orig_time) <= dateEnd 
+    and (security_code not like "90%" and security_code not like "20%")
+    and ((time(orig_time) >= 09:30:00 && time(orig_time) <= 11:30:00) || (time(orig_time) >= 13:00:00 && time(orig_time) <= 15:00:00))
+    group by security_code, bar(orig_time, 5m) as trade_time;
+    
+    renderTransformedDataFunc(dbName, tbName, tick_aggr)
+}
+
+/**
+* Load multiple files into a DolphinDB table.
+* 
+* @param dbName: STRING, database name.
+* @param tbName: STRING, table name.
+* @param filePathList: STRING VECTOR, A list of file paths to be loaded.
+* @param renderSchemaCsvFunc: FUNCTION, The function used to generate the schema of the CSV file.
+* @param renderDateListFunc: FUNCTION, The function used to generate a list of dates from the file path.
+* @param renderTransformedDataFunc: FUNCTION, The function used to transform the data before loading it into the table.
+*/
+def loadFiles(dbName, tbName, filePathList, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc){
+    for (filePath in filePathList){
+        loadOneFile(dbName, tbName, filePath, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc)
+        writeLogAndPrint("Server S0200 FACPLF: File '" + filePath + "' loaded to table '" + dbName + ":" + tbName + "' successfully.")
+    }
+}
+
+
+/**
+* Submits a DolphinDB job with the given file path list, database name, table name, and department name.
+* 
+* @param dbName: STRING, The name of the database to load the data into.
+* @param tbName: STRING, The name of the table to load the data into.
+* @param filePathList: STRING VECTOR, A list of file paths to be loaded into the database table.
+* @param dateList: DATE VECTOR, A list of dates to be loaded into the database table.
+* @param renderSchemaCsvFunc: FUNCTION, The function used to generate the schema of the CSV file.
+* @param renderDateListFunc: FUNCTION, The function used to generate a list of dates from the file path.
+* @param renderTransformedDataFunc: FUNCTION, The function used to transform the data before loading it into the table.
+*/
+def submitDataLoadJob(dbName, tbName, filePathList, dateList, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc){
+    dlid = rand(uuid(), 1)[0]
+    startDate_ = first(dateList)
+    endDate_ = last(dateList)
+    createTime = now()
+    user = getCurrentSessionAndUser()[1]
+    jobDes= user + " " + dbName + ":" + tbName + " "+string(now())
+    jobId = user + "_" + concat((string(now()).regexReplace(":", "")).split("."), "_") + "_" + string(dlid).regexReplace("-", "_")
+    jobId = submitJob(jobId, jobDes, loadFiles{dbName, tbName, filePathList, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc})
+    writeLogAndPrint("Server S0200 FACPLF: Job '" + jobId + "' submitted successfully.")
+    return jobId
+}
+
+
+/**
+*
+* @param dbName: STRING, The name of the database to load the data into.
+* @param tbName: STRING, The name of the table to load the data into.
+* @param dateStart: DATE, The start date of processing data.
+* @param dateEnd: DATE, The end date of processing data.
+* @param snapDbName: STRING, The name of the database related to original snapshot data.
+* @param snapTbName: STRING, The name of the table related to original snapshot data.
+* @param doAggSnapshotFunc: FUNCTION, The function used to aggregate the original snapshot data.
+* @param renderTransformedDataFunc: FUNCTION, The function used to transform the data before loading it into the table.
+*/
+def submitAggSnapshotJob(dbName, tbName, dateStart, dateEnd, snapDbName, snapTbName, doAggSnapshotFunc, renderTransformedDataFunc){
+    dlid = rand(uuid(), 1)[0]
+    createTime = now()
+    user = getCurrentSessionAndUser()[1]
+    jobDes= user + " " + "aggSnapshot_" + dbName + ":" + tbName + ":" + temporalFormat(dateStart, 'yyyyMMdd') + "->" + temporalFormat(dateEnd, 'yyyyMMdd') + " "+string(now())
+    jobId = user + "_" + concat((string(now()).regexReplace(":", "")).split("."), "_") + "_" + string(dlid).regexReplace("-", "_")
+    
+    jobId = submitJob(jobId, jobDes, doAggSnapshotFunc{dbName, tbName, dateStart, dateEnd, snapDbName, snapTbName, renderTransformedDataFunc})
+    writeLogAndPrint("Server S0200 FACPLF: Job '" + jobId + "' submitted successfully.")
+    return jobId
+}
+
+
+/**
+* This function creates a database and a table with the given names. If the database or table already exists, it will be dropped and recreated depending on the initDb and initTb flag.
+* 
+* @param dbName: STRING, The name of the database to be created.
+* @param tbName: STRING, The name of the table to be created.
+* @param initDb: BOOL, Whether to drop and recreate the database if it already exists.
+* @param initTb: BOOL, Whether to drop and recreate the table if it already exists.
+* @param creatDbFunc: FUNCTION, The function used to create the database.
+* @param createTbFunc: FUNCTION, The function used to create the table.
+*/
+def createDBAndTable(dbName, tbName, initDb, initTb, creatDbFunc, createTbFunc){
+    if (!existsDatabase(dbName)) {
+        creatDbFunc(dbName)
+        writeLogAndPrint("Server S0200 FACPLF: Database '" + dbName + "' created successfully.")
+    } else if (initDb) {
+        dropDatabase(dbName)
+        writeLogAndPrint("Server S0200 FACPLF: Database '" + dbName + "' dropped successfully.")
+        creatDbFunc(dbName)
+        writeLogAndPrint("Server S0200 FACPLF: Database '" + dbName + "' created successfully.")
+    }
+    if (!existsTable(dbName, tbName)) {
+        createTbFunc(dbName, tbName)
+        writeLogAndPrint("Server S0200 FACPLF: Table '" + tbName + "' created successfully.")
+    } else if (initTb) {
+        dropTable(database(dbName), tbName)
+        writeLogAndPrint("Server S0200 FACPLF: Table '" + tbName + "' dropped successfully.")
+        createTbFunc(dbName, tbName)
+        writeLogAndPrint("Server S0200 FACPLF: Table '" + tbName + "' created successfully.")
+    }
+}
+
+def pactchInDB(t,n,patch,allNum,dbName,tbName)
+{
+    print `正在处理第+string(n)+`批次
+    // 确定第 n 批的开始位置
+    start = patch * n
+    // 确定结束位置，是总数量和n + 1批的较小值
+    num = iif(patch * (n + 1) < allNum,patch,allNum - patch * n)
+    // 提取数据
+    tmp1 = select * from t limit start, num
+    // 转换数据类型
+    // tranTmp = tranData(tmp1,date)
+    // 入库
+    loadTable(dbName,tbName).append!(tmp1)
+}
+
+/**
+* Transform the data before inserting into the database.
+*/
+def renderTransformedDataAll(dbName, tbName, mutable data){
+    
+    // loadTable(dbName, tbName).append!(data)
+    // 指定每批导入的条数，样例数据 10万条 50MB，指定 100万 约 500MB
+    patch = 1000000
+    print `总共有+string(ceil(data.size()\patch) - 1)+`批次数据需要处理
+    // 分批保存数据
+    loop(pactchInDB{data,,patch,data.size(),dbName ,tbName},0..(ceil(data.size()\patch) - 1))
+    data = NULL
+    print "finished!"
+    // 手动清除TSDB占用的缓冲，否则系统10min调用一次
+    flushTSDBCache()
+}
+
+
+/**
+* Cut a list of file paths into smaller chunks for parallel processing.
+*
+* @param filePathList: STRING VECTOR, A list of file paths to be cut.
+* @param threadNum: INT, The number of threads to be used for parallel processing.
+* @return ANY VECTOR, A list of file paths cut into smaller chunks for parallel processing.
+*/
+def cutFilePathList(filePathList, threadNum){
+    parallel = min(threadNum, size(filePathList))
+    num = size(filePathList) / parallel
+    cond = size(filePathList) % parallel
+    points = iterate(0, 1, take(num+1, cond+1) <- take(num, parallel - cond-1))
+    filePathListCutted = cut(filePathList, points-points[0])
+    return filePathListCutted
+}
+
+def cutList(total_size, threadNum){
+    parallel = min(total_size, threadNum)
+    num = total_size / parallel 
+    cond = total_size % parallel
+    points = iterate(0, 1, take(num+1, cond+1) <- take(num, parallel-cond-1))
+    return points-points[0]
+}
+
+
+/**
+* Recursively finds all files in a directory and its subdirectories that match a given pattern.
+*
+* @param path: STRING, A string representing the path of the directory to search.
+* @param regex: STRING, A string representing the pattern to match.
+* @return  STRING VECTOR, A list of file paths that match the given pattern.
+*/
+def findPath(fileDir, regex=NULL){
+    if(endsWith(fileDir, "/")){
+        filedir = fileDir
+    }else{
+        filedir = fileDir + "/"
+    }
+    res = filedir + exec filename from files(filedir) where regexFind(filename, regex) != -1
+    folderFiles = exec filename from files(filedir) where isDir=true
+    if(size(folderFiles)==0) return res
+    for(folder in folderFiles){
+            res = res join findPath(filedir + folder, regex)
+    }
+    return res
+}
+
+
+
+/**
+* 根据文件路径列表返回对应的数据记录的日期列表
+*/
+def renderDateList(filePathList){
+    l = array(DATE, 0)
+    for (filePath in filePathList){
+        splited = filePath.split("_")
+        l.append!(temporalParse(splited[regexFind(splited, "[0-9]{8}$")==0], "yyyyMMdd"))
+    }
+    return l
+}
+
+
+/**
+* 返回指定文件夹下的文件路径列表
+*/
+def renderFilePathListEntrustAll(rootPath, startDate, endDate){
+    All = findPath(rootPath, "order_")
+    res = exec filePath from table(renderDateList(All) as `fileDate, All as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListTradeAll(rootPath, startDate, endDate){
+    All = findPath(rootPath, "execution_")
+    res = exec filePath from table(renderDateList(All) as `fileDate, All as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListSnapshotAll(rootPath, startDate, endDate){
+    All = findPath(rootPath, "snapshot_")
+    res = exec filePath from table(renderDateList(All) as `fileDate, All as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+
+
+/**
+* 创建数据库
+*/
+def createDatabaseEntrustAll(dbName){
+    db1 = database(, VALUE, 2023.04.01..2023.05.01)
+    db2 = database(, HASH, [SYMBOL, 20])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+
+def createDatabaseTradeAll(dbName){
+    db1 = database(, VALUE, 2023.04.01..2023.05.01)
+    db2 = database(, HASH, [SYMBOL, 20])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+
+def createDatabaseSnapshotAll(dbName){
+    db1 = database(, VALUE, 2023.04.01..2023.05.01)
+    db2 = database(, HASH, [SYMBOL, 20])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseKLineChart(dbName){
+    db1 = database(, VALUE, 2023.04.01..2023.05.01)
+    db2 = database(, HASH, [SYMBOL, 10])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+
+
+/**
+* Return CSV file schema.
+*/
+def renderSchemaCsvEntrustAll(){
+    name = `market_type`security_code`channel_no`appl_seq_num`order_time`order_price`order_volume`side`order_type`md_stream_id`orig_order_no`biz_index`variety_category`receivedTime`alias_time
+    typeString =`INT`SYMBOL`INT`LONG`TIMESTAMP`LONG`LONG`CHAR`CHAR`STRING`LONG`LONG`CHAR`NANOTIMESTAMP`TIMESTAMP
+    return table(name, typeString)
+}
+def renderSchemaCsvTradeAll(){
+    name = `market_type`security_code`exec_time`channel_no`appl_seq_num`exec_price`exec_volume`value_trade`bid_appl_seq_num`offer_appl_seq_num`side`exec_type`md_stream_id`biz_index`variety_category`receivedTime`alias_time
+    typeString =`INT`SYMBOL`TIMESTAMP`INT`LONG`LONG`LONG`LONG`LONG`LONG`CHAR`CHAR`STRING`LONG`CHAR`NANOTIMESTAMP`TIMESTAMP
+    return table(name, typeString)
+}
+def renderSchemaCsvSnapshotAll(){
+    name = `market_type`security_code`orig_time`trading_phase_code`pre_close_price`open_price`high_price`low_price`last_price`close_price`bid_price`bid_volume`offer_price`offer_volume`num_trades`total_volume_trade`total_value_trade`total_bid_volume`total_offer_volume`weighted_avg_bid_price`weighted_avg_offer_price`IOPV`yield_to_maturity`high_limited`low_limited`price_earning_ratio1`price_earning_ratio2`change1`change2`channel_no`md_stream_id`instrument_status`pre_close_iopv`alt_weighted_avg_bid_price`alt_weighted_avg_offer_price`etf_buy_number`etf_buy_amount`etf_buy_money`etf_sell_number`etf_sell_amount`etf_sell_money`total_warrant_exec_volume`war_lower_price`war_upper_price`withdraw_buy_number`withdraw_buy_amount`withdraw_buy_money`withdraw_sell_number`withdraw_sell_amount`withdraw_sell_money`total_bid_number`total_offer_number`bid_trade_max_duration`offer_trade_max_duration`num_bid_orders`num_offer_orders`last_trade_time`variety_category`receivedTime`alias_time
+    typeString =`INT`SYMBOL`TIMESTAMP`STRING`LONG`LONG`LONG`LONG`LONG`LONG"LONG[]""LONG[]""LONG[]""LONG[]"`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`INT`STRING`STRING`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`INT`INT`INT`INT`LONG`CHAR`NANOTIMESTAMP`TIMESTAMP
+    return table(name, typeString)
+}
+
+
+/**
+* 返回表结构
+*/
+def renderSchemaTbEntrustAll(){
+    name = `market_type`security_code`channel_no`appl_seq_num`order_time`order_price`order_volume`side`order_type`md_stream_id`orig_order_no`biz_index`variety_category`receivedTime`alias_time
+    type =`INT`SYMBOL`INT`LONG`TIMESTAMP`LONG`LONG`CHAR`CHAR`STRING`LONG`LONG`CHAR`NANOTIMESTAMP`TIMESTAMP
+	return table(1:0, name, type)
+}
+def renderSchemaTbTradeAll(){
+    name = `market_type`security_code`exec_time`channel_no`appl_seq_num`exec_price`exec_volume`value_trade`bid_appl_seq_num`offer_appl_seq_num`side`exec_type`md_stream_id`biz_index`variety_category`receivedTime`alias_time
+    type =`INT`SYMBOL`TIMESTAMP`INT`LONG`LONG`LONG`LONG`LONG`LONG`CHAR`CHAR`STRING`LONG`CHAR`NANOTIMESTAMP`TIMESTAMP
+    return table(1:0, name, type)
+}
+def renderSchemaTbSnapshotAll(){
+    name = `market_type`security_code`orig_time`trading_phase_code`pre_close_price`open_price`high_price`low_price`last_price`close_price`bid_price`bid_volume`offer_price`offer_volume`num_trades`total_volume_trade`total_value_trade`total_bid_volume`total_offer_volume`weighted_avg_bid_price`weighted_avg_offer_price`IOPV`yield_to_maturity`high_limited`low_limited`price_earning_ratio1`price_earning_ratio2`change1`change2`channel_no`md_stream_id`instrument_status`pre_close_iopv`alt_weighted_avg_bid_price`alt_weighted_avg_offer_price`etf_buy_number`etf_buy_amount`etf_buy_money`etf_sell_number`etf_sell_amount`etf_sell_money`total_warrant_exec_volume`war_lower_price`war_upper_price`withdraw_buy_number`withdraw_buy_amount`withdraw_buy_money`withdraw_sell_number`withdraw_sell_amount`withdraw_sell_money`total_bid_number`total_offer_number`bid_trade_max_duration`offer_trade_max_duration`num_bid_orders`num_offer_orders`last_trade_time`variety_category`receivedTime`alias_time
+    type =`INT`SYMBOL`TIMESTAMP`STRING`LONG`LONG`LONG`LONG`LONG`LONG"LONG[]""LONG[]""LONG[]""LONG[]"`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`INT`STRING`STRING`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`LONG`INT`INT`INT`INT`LONG`CHAR`NANOTIMESTAMP`TIMESTAMP
+    return table(1:0, name, type)
+}
+def renderSchemaTbKLineChart(){
+    name = `security_code`trade_time`open`high`low`close`vol`amount`vwap`s1`b1`bs_avg_price`wb`price_adj`ret
+    type = `SYMBOL`TIMESTAMP`LONG`LONG`LONG`LONG`LONG`DOUBLE`DOUBLE`LONG`LONG`LONG`DOUBLE`DOUBLE`DOUBLE
+    return table(1:0, name, type)
+}
+def renderSchemaTbFiveMinKLineChart(){
+    name = `security_code`trade_time`open`high`low`close`vol`amount`vwap`wb`price_adj
+    type = `SYMBOL`TIMESTAMP`LONG`LONG`LONG`LONG`LONG`DOUBLE`DOUBLE`DOUBLE`DOUBLE
+    return table(1:0, name, type)
+} 
+
+
+/**
+* 创建表
+*/
+def createTableEntrustAll(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbEntrustAll(), tableName=tbName, partitionColumns=`order_time`security_code, compressMethods={order_time:"delta"}, sortColumns=`security_code`order_time, keepDuplicates=ALL)
+    // createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbEntrustAll(), tableName=tbName, partitionColumns=`order_time`security_code, compressMethods={order_time:"delta"}, sortColumns=`security_code`appl_seq_num`order_time, keepDuplicates=LAST)
+}
+def createTableTradeAll(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbTradeAll(), tableName=tbName, partitionColumns=`exec_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`exec_time, keepDuplicates=ALL)
+    // createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbTradeAll(), tableName=tbName, partitionColumns=`exec_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`appl_seq_num`exec_time, keepDuplicates=LAST)
+}
+def createTableSnapshotAll(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbSnapshotAll(), tableName=tbName, partitionColumns=`orig_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`orig_time, keepDuplicates=LAST)
+}
+def createTableKLineChart(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbKLineChart(), tableName=tbName, partitionColumns=`trade_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`trade_time, keepDuplicates=LAST)
+}
+def createTableFiveMinKLineChart(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbFiveMinKLineChart(), tableName=tbName, partitionColumns=`trade_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`trade_time, keepDuplicates=LAST)
+}
+
+

@@ -1,0 +1,564 @@
+def get_forward_returns_columns(cols_names, require_exact_day_multiple=false){
+    /*
+    Utility that detects and returns the columns that are forward returns
+    */
+    tmp1 = cols_names[like(cols_names, "forward_returns_%")]
+    tmp2 = substr(tmp1, strlen("forward_returns_"), strlen(tmp1)-strlen("forward_returns_")-1)
+    index_sort = isort(int(tmp2))
+    return tmp1[index_sort]
+}
+
+def agg_stats_calc(tb,agg_colums,agg_func,grouper=NULL){
+    /*
+    sub function
+    */
+	n=size(agg_colums)*size(agg_func)
+	if(size(agg_func)>1){
+	 	aggmatecode=each(def(x,y)->sqlCol(x,funcByName(y),x+"_"+y),take(agg_colums,n),sort(take(agg_func,n)))
+	}
+	else{
+		aggmatecode=each(def(x,y)->sqlCol(x,funcByName(y),x),take(agg_colums,n),sort(take(agg_func,n)))
+		}
+    if( isVoid(grouper)){
+    return sql(aggmatecode,tb).eval()
+    }
+    groupByCols=each(x->sqlCol(x),grouper)
+    return sql(aggmatecode,tb,groupBy=groupByCols).eval()
+}
+
+def select_specified_partial_columns(tb,res,dist=NULL){
+    /*
+    sub function
+    */
+    select_cols=sqlCol(res)
+    if(!isVoid(dist)){
+        select_cols=sqlColAlias(select_cols,dist)
+        }
+    return sql(select_cols,tb).eval()
+}
+
+def plot_quantile_statistics_table(factor_data) {
+    /*
+	Quantiles Statistics
+	*/
+    aggmatecode=each(x->sqlCol('factor',funcByName(x),x),['min', 'max', 'mean', 'std', 'count'])
+    quantile_stats=sql(aggmatecode,factor_data,groupBy=[sqlCol("factor_quantile")]).eval()
+    update quantile_stats set count_=count\sum(count)
+	return quantile_stats
+}
+
+
+def rate_of_return(period_ret, conversion_factor){
+    /*
+    Convert returns to 'one_period_len' rate of returns: that is the value the
+    returns would have every 'one_period_len' if they had grown at a steady
+    rate. only support period unit is day.
+
+    Parameters
+    ----------
+    period_ret: table
+        DataFrame containing returns values with column headings representing
+        the return period.
+    base_period: string
+        The base period length used in the conversion
+        It must follow pandas.Timedelta constructor format (e.g. '1 days',
+        '1D', '30m', '3h', '1D1h', etc)
+
+    Returns
+    -------
+    table
+        table in same format as input but with 'one_period_len' rate of
+        returns values.
+     */
+     return pow(period_ret+1,conversion_factor)-1
+}
+
+def rate_of_return_tb(mean_quant_ret){
+	
+    return_cols=get_forward_returns_columns(colNames(mean_quant_ret))
+    conversion_factor=substr(return_cols, strlen("forward_returns_"),strlen(return_cols)-strlen("forward_returns_")-1)
+    select_cols=sqlCol((set(colNames(mean_quant_ret))-set(return_cols)).keys())
+    cols=sqlColAlias(each(def(period_ret, base_period):makeCall(rate_of_return{,base_period},sqlCol(period_ret)),return_cols,
+    min(float(conversion_factor))\float(conversion_factor)),return_cols)
+    for( icol in cols){
+        select_cols.append!(icol)
+    }
+ 
+    return sql(select_cols,mean_quant_ret).eval()
+}
+
+def to_weights(group_each, demeaned_=true, equal_weight_=true){
+    /*
+    sub function of factor_weights
+    calculate weights according to bool value of demeaned, equal_weight
+    */
+    Group=group_each
+	if (equal_weight_){
+		if(demeaned_){
+			Group=Group-med(Group)
+			}
+		negative_mask = Group < 0
+		Group[negative_mask]=-1.0
+		 positive_mask = Group >= 0
+		Group[positive_mask]=1.0
+		if(demeaned_){
+			if(sum(negative_mask)){
+				 Group[negative_mask] = Group[negative_mask]\ (1.0*negative_mask.sum())
+				}
+			if(sum(positive_mask)){
+				Group[positive_mask] =Group[positive_mask]\(1.0*positive_mask.sum())
+				}
+			}
+		}
+	else if(demeaned_){
+		Group=Group-mean(Group)
+		}
+
+	return Group \ sum(abs(Group))
+}
+
+
+def factor_weights(factor_data_,
+    demeaned=true,
+    group_adjust=false,
+    equal_weight=false){
+    /*
+    Computes asset weights by factor values and dividing by the sum of their
+    absolute value (achieving gross leverage of 1). Positive factor values will
+    results in positive weights and negative values in negative weights.
+
+    Parameters
+    ----------
+    factor_data : table
+        table with columns: date, asset, values for a single alpha factor,
+        forward returns for each period, the factor quantile/bin that factor value belongs to, and
+        (optionally) the group the asset belongs to.
+        - See full explanation in utils.get_clean_factor_and_forward_returns
+    demeaned : bool
+        Should this computation happen on a long short portfolio? if True,
+        weights are computed by demeaning factor values and dividing by the sum
+        of their absolute value (achieving gross leverage of 1). The sum of
+        positive weights will be the same as the negative weights (absolute
+        value), suitable for a dollar neutral long-short portfolio
+    group_adjust : bool
+        Should this computation happen on a group neutral portfolio? If True,
+        compute group neutral weights: each group will weight the same and
+        if 'demeaned' is enabled the factor values demeaning will occur on the
+        group level.
+    equal_weight : bool, optional
+        if True the assets will be equal-weighted instead of factor-weighted
+        If demeaned is True then the factor universe will be split in two
+        equal sized groups, top assets with positive weights and bottom assets
+        with negative weights。
+
+    Returns
+    -------
+    returns : vector
+        Assets weighted by factor value.
+    */
+    factor_data = factor_data_
+    grouper =sqlCol(['date'])
+    if (group_adjust){
+        grouper.append!(sqlCol('Group'))
+    }
+    select_cols=sqlCol(['date','asset'])
+    // select_cols.append!(sqlColAlias(makeCall(to_weights{,demeaned, equal_weight},sqlCol('factor')),'factor'))
+    select_cols.append!(sqlColAlias(makeCall(to_weights,sqlCol('factor'),demeaned, equal_weight),'factor'))//0.073
+    weights =sql(select_cols,factor_data,groupBy=grouper,groupFlag=0).eval()//160
+    if (group_adjust){
+        select_cols=sqlCol(['date','asset'])
+        select_cols.append!(sqlColAlias(makeCall(to_weights,sqlCol('factor'),false, false),'factor'))
+        weights=sql(select_cols,weights,groupBy=sqlCol('date'),groupFlag=0).eval()
+    }
+    return weights
+}
+
+
+def factor_returns(factor_data,
+    demeaned=true,
+    group_adjust=false,
+    equal_weight=false,
+    by_asset=false){
+    /*
+    Computes period wise returns for portfolio weighted by factor values.
+
+    Parameters
+    ----------
+    factor_data : table
+        table with columns: date, asset, values for a single alpha factor,
+        forward returns for each period, the factor quantile/bin that factor value belongs to, and
+        (optionally) the group the asset belongs to.
+        - See full explanation in utils.get_clean_factor_and_forward_returns
+    demeaned : bool
+        Control how to build factor weights
+        -- see performance.factor_weights for a full explanation
+    group_adjust : bool
+        Control how to build factor weights
+        -- see performance.factor_weights for a full explanation
+    equal_weight : bool, optional
+        Control how to build factor weights
+        -- see performance.factor_weights for a full explanation
+    by_asset: bool, optional
+        If True, returns are reported separately for each esset.
+
+    Returns
+    -------
+    returns : table
+        Period wise factor returns
+    */
+    weights =  factor_weights(factor_data, demeaned, group_adjust, equal_weight)
+
+   
+    weights=weights.rename!(`date`asset`weight)
+    forward_returns_columns=get_forward_returns_columns(colNames(factor_data))
+    select_cols=sqlCol(`date`asset)
+    calc_cols=sqlColAlias(each(x->unifiedExpr((sqlCol(x),sqlCol(`weight)),*),forward_returns_columns),forward_returns_columns)
+    for (icol in calc_cols){
+        select_cols.append!(icol)
+        }
+    returns=sql(select_cols,lj(factor_data,weights,`date`asset)).eval()
+
+    if (!by_asset){
+        calc_cols=each(x->sqlCol(x,sum,x),forward_returns_columns)
+        returns =sql(calc_cols,returns,groupBy=<date>,groupFlag=1).eval() 
+    }
+
+    return returns
+}
+
+
+def demean_forward_returns(factor_data, grouper=NULL){
+    /*
+    Convert forward returns to returns relative to mean
+    period wise all-universe or group returns.
+    group-wise normalization incorporates the assumption of a
+    group neutral portfolio constraint and thus allows allows the
+    factor to be evaluated across groups.
+
+    For example, if AAPL 5 period return is 0.1% and mean 5 period
+    return for the Technology stocks in our universe was 0.5% in the
+    same period, the group adjusted 5 period return for AAPL in this
+    period is -0.4%.
+
+    Parameters
+    ----------
+    factor_data : table
+        Forward returns with columns: date and asset.
+        Separate column for each forward return window.
+    grouper : vector
+        If True, demean according to group.
+
+    Returns
+    -------
+    adjusted_forward_returns : table
+        table of the same format as the input, but with each
+        security's returns normalized by group.
+    */
+    grouper_=grouper
+    if (isVoid(grouper)){
+        grouper_ =[ 'date']
+    }
+	   
+    cols = get_forward_returns_columns(colNames(factor_data))
+    select_cols=sqlCol((set(colNames(factor_data))-set(cols)).keys())
+    for (icol in sqlColAlias(parseExpr(each(strReplace{"x-mean(x)", "x",},cols)),cols)){
+    select_cols.append!(icol)
+    }
+
+    return sql(select_cols,factor_data,groupby=sqlCol(grouper_),groupFlag=0).eval()
+}
+
+def cumulative_returns(returns,starting_value=1){
+    /*
+    Computes cumulative returns from simple daily returns.
+
+    Parameters
+    ----------
+    returns: tableplot_cumulative_returns_by_quantile
+        table containing daily factor returns (i.e. '1D' returns).
+
+    Returns
+    -------
+    Cumulative returns series : vector
+        Example:
+            2015-01-05   1.001310
+            2015-01-06   1.000805
+            2015-01-07   1.001092
+            2015-01-08   0.999200
+    */
+    if (size(returns) < 1){
+        return returns
+    }
+    returns_=returns
+    nanmask = isNull(returns_)
+    if (sum(nanmask)){
+        returns_[nanmask] = 0
+    }
+    out=cumprod(returns+1)
+    if( starting_value == 0)
+        return out-1
+    else{
+        return out*starting_value
+    }
+}
+
+def plot_cumulative_returns_by_quantile(quantile_returns, period){
+    /*
+    Plots the cumulative returns of various factor quantiles.
+
+    Parameters
+    ----------
+    quantile_returns : table
+        Returns by factor quantile
+    period : Timedelta or string
+        Length of period for which the returns are computed (e.g. 1 day)
+        if 'period' is a string it must follow Timedelta constructor
+        format (e.g. '1 days', '1D', '30m', '3h', '1D1h', etc)
+    */
+    index_cols=(set(colNames(quantile_returns))-set([period,'factor_quantile'])).keys()
+	pivotby=sqlCol( index_cols).append!(sqlCol('factor_quantile'))
+	quantile_returns_=sql(sqlCol(period),quantile_returns,groupBy=pivotby,groupFlag=2).eval()
+	factor_quantiles=size((set(colNames(quantile_returns_))-set(index_cols)).keys())
+	quantile_returns_.rename!(index_cols.append!(`C+string(1..factor_quantiles)))
+	index_cols=(set(colNames(quantile_returns))-set([period,'factor_quantile'])).keys()
+    select_cols=sqlCol(index_cols)
+    for (icol in (set(colNames(quantile_returns_))-set(index_cols)).keys()){
+        metacode=sqlColAlias(makeCall(cumulative_returns,sqlCol(icol)),icol)
+        select_cols.append!(metacode)
+        }
+    return sql(select_cols,quantile_returns_).eval()
+}
+
+def calculate_factor_IC(factor_data, group_adjust=false, by_group=false, cal_func=corr){
+    /*
+    根据输入参数cal_func来计算因子IC值
+    */
+    factor_data_ = factor_data
+    grouper = ['date'] 
+    if (group_adjust){
+        factor_data_ = demean_forward_returns(factor_data,grouper.append!('Group'))
+    }
+    grouper = ['date']                                       
+    if (by_group){
+        grouper.append!('Group') 
+    }
+    forward_returns_columns=get_forward_returns_columns(colNames(factor_data_)) //0.067ms
+    //    select_cols=sqlCol((set(colNames(fa ctor_data_))-set(forward_returns_columns)).keys())
+    select_cols=[]
+    for (icol in forward_returns_columns){
+        select_cols.append!(sqlColAlias(makeCall(cal_func, sqlCol(`factor), sqlCol(icol)),icol))
+        } 
+    return sql(select_cols,factor_data_,groupBy=sqlCol(grouper),groupFlag=1).eval() 
+}
+
+def calculate_factor_tValue(factor_data, group_adjust=false, by_group=false){
+    /*
+    计算因子的和收益率的t-value
+    */
+    factor_data_ = factor_data
+    grouper = ['date'] 
+    if (group_adjust){
+        factor_data_ = demean_forward_returns(factor_data,grouper.append!('Group'))
+    }
+    grouper = ['date']                                       
+    if (by_group){
+        grouper.append!('Group') 
+    }
+    forward_returns_columns=get_forward_returns_columns(colNames(factor_data_)) //0.067ms
+    //    select_cols=sqlCol((set(colNames(fa ctor_data_))-set(forward_returns_columns)).keys())
+    select_cols=[]
+    for (icol in forward_returns_columns){
+        select_cols.append!(sqlColAlias(parseExpr(strReplace("ols(factor, iCol)[1][`tStat]", 'iCol', icol)), icol))
+        } 
+    return sql(select_cols,factor_data_,groupBy=sqlCol(grouper),groupFlag=1).eval() 
+}
+
+def obtain_indicator_aggregation(indicator_data){
+    /*
+    indicator_data中包括IC,RankIC,tValue的所有时间截面取值，根据indicator_data计算IC，RankIC，tValue中的相关统计值
+    */
+    ic_data = indicator_data[`IC]
+    forward_returns_columns=get_forward_returns_columns(colNames(ic_data))
+
+    // calculate the related information about IC
+    names=["IC_Mean","IC_Std","ICIR","IC_Skew","IC_Kurtosis","IC_p_value"]
+    f = def(data, names, col){
+        agg_func = ["mean(ic)", "std(ic)", "mean(ic)\\std(ic)" ,"skew(ic)" ,"kurtosis(ic)-3","float(tTest(ic, , 0)[`stat][`pValue][0])"]
+        select_cols=sqlColAlias(parseExpr(strReplace(agg_func,"ic",col)),names)
+        return select col as forward_returns,* from  sql(select_cols, data).eval()
+    }
+    res = unionAll(peach(f{ic_data,names},forward_returns_columns),0,0)
+    num_total = size(ic_data)
+    IClgZero_l = array(FLOAT)
+    for (col in forward_returns_columns){
+        whereCondition = expr(sqlCol(col), >, 0)
+        num_lgZero = sql(select=sqlColAlias(<count(*)>), from=ic_data, where=whereCondition, exec=true).eval()
+        IClgZero_l.append!(num_lgZero\num_total*100)
+    }
+    update res set IClgZero = IClgZero_l
+    ret = select value from res.unpivot(`forward_returns, names.copy().append!(`IClgZero)) pivot by valueType as Information_Analysis, forward_returns
+    ret_cols = sqlCol([colNames(ret)[0]].append!(forward_returns_columns))
+    ret1 = sql(ret_cols, ret).eval()
+
+    // calculate the related information about RankIC
+    rankic_data = indicator_data[`RankIC]
+    names=strReplace(names, `IC, `RankIC)
+    res = unionAll(peach(f{rankic_data,names},forward_returns_columns),0,0)     
+    num_total = size(rankic_data)
+    IClgZero_l = array(FLOAT)
+    for (col in forward_returns_columns){
+        whereCondition = expr(sqlCol(col), >, 0)
+        num_lgZero = sql(select=sqlColAlias(<count(*)>), from=ic_data, where=whereCondition, exec=true).eval()
+        IClgZero_l.append!(num_lgZero\num_total*100)
+    }
+    update res set RankIClgZero = IClgZero_l
+    ret2 = select value from res.unpivot(`forward_returns, names.copy().append!(`RankIClgZero)) pivot by valueType as Information_Analysis, forward_returns
+    
+    tvalue_data = indicator_data[`tValue]
+    tvalue_data = sql(select=sqlCol(columnNames(tvalue_data)[1:]), from=tvalue_data).eval()
+    tAbsMean = tvalue_data.abs().mean()
+    tlgTwo = (tvalue_data.abs()>2).sum() \ size(tvalue_data)
+    tMean = tvalue_data.mean()
+    d = unionAll([tAbsMean, tlgTwo, tMean], 0, 0)
+    update d set Information_Analysis=`t_absMean`t_lgTwo`t_mean
+    ret3 = sql(select=sqlCol([`Information_Analysis].append!(columnNames(d)[:size(forward_returns_columns)])), from=d).eval()
+
+    return unionAll([ret1, ret2, ret3], 0, 0)
+}
+
+def mean_return_by_quantile_v2(factor_data_in,
+    by_date=false,
+    by_group=false,
+    demeaned=true,
+    group_adjust=false){ 
+    /*
+    alphalens函数库中的计算误差的公式似乎有误？ 在本函数中做了修改
+    Computes mean returns for factor quantiles across
+    provided forward returns columns.
+
+    Parameters
+    ----------
+    factor_data_in : table
+        table with columns: date, asset, values for a single alpha factor,
+        forward returns for each period, the factor quantile/bin that factor value belongs to, and
+        (optionally) the group the asset belongs to.
+        - See full explanation in utils.get_clean_factor_and_forward_returns
+    by_date : bool
+        If True, compute quantile bucket returns separately for each date.
+    by_group : bool
+        If True, compute quantile bucket returns separately for each group.
+    demeaned : bool
+        Compute demeaned mean returns (long short portfolio)
+    group_adjust : bool
+        Returns demeaning will occur on the group level.
+
+    Returns
+    -------
+    mean_ret : table
+        Mean period wise returns by specified factor quantile.
+    std_error_ret : table
+        Standard error of returns by specified quantile.
+    */
+    if (group_adjust) {
+        grouper = ['Group','date']
+        factor_data = demean_forward_returns(factor_data_in,grouper)
+    }else if(demeaned) {
+        factor_data = demean_forward_returns(factor_data_in,NULL)
+    }else {
+        factor_data = factor_data_in
+    } 
+    grouper = ['factor_quantile','date']
+    
+    if (by_group) {
+        grouper.append!('Group') 
+    }
+    forward_returns_columns=get_forward_returns_columns(colNames(factor_data))
+    group_stats = agg_stats_calc(factor_data,forward_returns_columns,['mean', 'std', 'count'],grouper)//221
+    allcolumns=colNames(group_stats)
+    select_cols=grouper
+    dist=grouper
+    for (icol in allcolumns[allcolumns like "%_mean"]){
+        select_cols.append!(icol)
+        dist.append!(icol[:(strlen(icol)-5)])
+        }
+    mean_ret = select_specified_partial_columns(group_stats,select_cols,dist)
+        
+    if (not by_date){
+        grouper = ['factor_quantile']
+        if (by_group) {
+            grouper.append!('Group')
+        }
+        group_stats= agg_stats_calc(mean_ret,forward_returns_columns,['mean', 'std', 'count'],grouper)
+        select_cols=select_cols[select_cols!='date']
+        dist=dist[dist!='date']
+        mean_ret = select_specified_partial_columns(group_stats,select_cols,dist)
+    }
+    select_cols=sqlCol(grouper)
+    cols=sqlColAlias(parseExpr(each(strReplace{"x_std*1.0\\(x_count**0.5)","x",},forward_returns_columns)),forward_returns_columns)	
+	for (icol in cols){
+		select_cols.append!(icol)
+		}
+	std_error_ret=sql(select_cols,group_stats).eval()
+    return mean_ret, std_error_ret
+}
+
+def plot_create_returns_tear_sheet(factor_data,long_short=true, group_neutral=false, by_group=false){
+    ret = dict(STRING, ANY)
+    // 计算因子各层的平均收益率
+    mean_quant_ret, std_quantile = mean_return_by_quantile_v2(factor_data, by_group=false,demeaned=long_short,group_adjust=group_neutral)
+    // 由于不同调仓周期的收益率为累积收益率，需要除以时间跨界做归一，便于比较
+    mean_quant_rateret=rate_of_return_tb(mean_quant_ret)
+    ret['mean_quant_rateret'] = mean_quant_rateret
+
+    // 因子随着时间变化的收益率
+    factor_returns_ = factor_returns(factor_data, long_short, group_neutral)
+    ret['factor_returns_'] = factor_returns_
+    // 计算因子各层随着时间的平均收益率
+    mean_quant_ret_bydate, std_quant_daily = mean_return_by_quantile_v2(factor_data,by_date=true, by_group=false,demeaned=true, group_adjust=false)
+    ret['mean_quant_ret_bydate'] = mean_quant_ret_bydate
+    // 由于不同预计周期的收益率为累积收益率，需要除以时间跨界做归一，便于比较
+    mean_quant_rateret_bydate = rate_of_return_tb(mean_quant_ret_bydate)
+    ret['mean_quant_rateret_bydate'] = mean_quant_rateret_bydate
+    
+    forward_returns_columns=get_forward_returns_columns(colNames(factor_returns_))
+    select_cols=[sqlCol(`date)]
+    cols=sqlColAlias(parseExpr(each(strReplace{"cumprod(x+1.0)","x",},forward_returns_columns)),forward_returns_columns)	
+    for (iCol in cols){
+        select_cols.append!(iCol)
+    }
+    // 计算不同预计周期下的累积收益率
+    cumulative_factor_data = sql(select_cols,factor_returns_).eval()
+    ret['cumulative_factor_data'] = cumulative_factor_data
+
+    // 计算不同预计周期下的因子各分层累积收益率
+    // calculate cumulative return of each quantile for all periods
+    for (icol in forward_returns_columns) {
+        index_cols=(set(colNames(mean_quant_ret_bydate))-set(forward_returns_columns)).keys()
+        index_cols.append!(icol)
+        tmp=select_specified_partial_columns(mean_quant_ret_bydate,index_cols)
+        cum_ret = plot_cumulative_returns_by_quantile(tmp, period=icol)
+        colNames = cum_ret.columnNames()[1:]
+        cum_ret = cum_ret.unpivot('date', colNames)
+        ret['cum_ret_quantile_'+icol] = cum_ret
+    }
+
+    if (by_group){
+        mean_return_quantile_group,mean_return_quantile_group_std_err = mean_return_by_quantile_v2(factor_data, by_group=true,demeaned=long_short,group_adjust=group_neutral)
+        mean_quant_rateret_group=rate_of_return_tb(mean_return_quantile_group)
+        ret['mean_quant_rateret_group'] = mean_quant_rateret_group
+    }
+    
+    return ret  
+}
+
+
+def create_factor_statistics_indicators(factor_data, group_neutral=false, by_group=false){
+    res = dict(STRING, ANY)
+    res[`IC] = evaluate_lib::calculate_factor_IC(factor_data, group_neutral, cal_func=corr)
+    res[`RankIC] = evaluate_lib::calculate_factor_IC(factor_data, group_neutral, cal_func=spearmanr)
+    res[`tValue] = evaluate_lib::calculate_factor_tValue(factor_data, group_neutral)
+    
+    indicator_agg = evaluate_lib::obtain_indicator_aggregation(res)
+    res[`indicator_agg] = indicator_agg
+    return res
+}
