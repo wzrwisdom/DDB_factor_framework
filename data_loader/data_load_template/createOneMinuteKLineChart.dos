@@ -1,0 +1,26 @@
+def createOneMinuteKLineChart(dbName, tbName, startDate, endDate, threadNum, snapDbName, snapTbName, initDb=false, initTb=false){
+    // 该模板为用户创建分钟级别K线图
+    jobIdlist = []
+    
+    if (startDate > endDate) {
+        throw "参数startDate 必须小于等于 参数endDate!"
+    }
+    // 创建数据库和分布式表
+    CSVDataModule::createDBAndTable(dbName, tbName, initDb, initTb, CSVDataModule::createDatabaseKLineChart, CSVDataModule::createTableKLineChart)
+    
+    // 以threadNum切分任务
+    days = endDate - startDate + 1
+    cutPosList = CSVDataModule::cutList(days, threadNum)
+    
+    periods  = cut(startDate..endDate, cutPosList)
+    for (period in periods){
+        jobId = CSVDataModule::submitAggSnapshotJob(dbName, tbName, period.head(), period.tail(), snapDbName, snapTbName, CSVDataModule::doAggSnapshotOneMinute, CSVDataModule::renderTransformedDataAll)
+        
+        jobIdlist.append!(jobId)
+    }
+
+    CSVDataModule::writeLogAndPrint("Server_S0001_FACPLF: All jobs submitted successfully.")
+
+    //返回任务ID为平台提供解析
+    return jobIdlist
+}

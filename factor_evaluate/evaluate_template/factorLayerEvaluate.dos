@@ -1,0 +1,56 @@
+def factorLayerEvaluate(
+    factorResult, 
+    priceTable, priceDate, startDate, endDate, priceSymbol, priceCol,
+    quantile=5,
+    period="1,5,10", 
+    filter_zscore=20, 
+    max_loss=0.35, 
+    zero_aware=false, 
+    cumulative_returns=true, 
+    long_short=true){
+    factor = select tradetime, securityid, value from factorResult
+
+    //prices
+    whereConditions = expr(startDate, <=, sqlCol(priceDate), <=, endDate)
+    pivotBy = [sqlColAlias(sqlCol(priceDate), `date), sqlCol(priceSymbol)]
+    prices = sql(select=sqlCol(priceCol), from=priceTable, where=whereConditions, groupBy=pivotBy, groupFlag=2).eval();
+
+    //Empty groupby or groupby_labels
+    groupby = NULL
+    groupby_labels = NULL
+    binning_by_group=false
+    group_neutral=false
+    by_group=false
+
+    //quantiles
+    quantiles = int(quantile)
+    bins = NULL
+
+    //periods
+    periods = int(period.split(","))
+
+    dicts = dict(STRING, ANY)
+    
+    
+    // alpahlens
+    factor_data = alphalens::get_clean_factor_and_forward_returns(factor,prices,groupby,binning_by_group,
+        quantiles,bins,periods,filter_zscore,groupby_labels,max_loss,zero_aware,cumulative_returns)
+    
+    
+    quantile_stats=evaluate_lib::plot_quantile_statistics_table(factor_data)
+    dicts[`quantile_stats] = quantile_stats
+    
+    indicator_info = evaluate_lib::create_factor_statistics_indicators(factor_data, group_neutral)
+    dicts.dictUpdate!(def(x,y):x, indicator_info.keys(), indicator_info.values())
+    
+    returns_info = evaluate_lib::plot_create_returns_tear_sheet(
+        factor_data, long_short, group_neutral, by_group)
+    dicts.dictUpdate!(def(x,y):x, returns_info.keys(), returns_info.values())
+    
+    // res: key+table
+    result = alphalens::extractTables(dicts)
+    
+    result["periods"] = dict(0..(count(periods)-1), periods)
+
+    return result
+}
