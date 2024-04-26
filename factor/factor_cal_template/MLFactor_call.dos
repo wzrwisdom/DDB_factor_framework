@@ -1,0 +1,37 @@
+def MLFactor_call(data, factorName, factorParameter, model_path, startDate, endDate, securityidName, tradetimeName){
+    // 因子计算模板参考
+    // data: 数据源
+    // factorName: 计算的因子
+    // factorParameter: 因子函数入参参数
+    // startDate, endDate: 计算起止时间
+
+    //step1: 处理因子入参参数，生成元编程列
+    args = ((factorParameter.strReplace(" ","")).split(","))
+    args = each(sqlCol, args)
+    
+    //step2: 生成元编程select
+    selects = [sqlCol(tradetimeName), sqlCol(securityidName)]
+    for (icode in args){
+        selects.append!(icode)
+    }
+    
+    //step3: 指定数据库与表
+    from_tb = data
+
+    //step4: 生成元编程whereCondition
+    whereConditions = expr(startDate, <=, sqlCol(tradetimeName, date), <=, endDate)
+
+    //step5: 生成sql语句并执行
+    rawData = sql(
+        select = selects,
+        from = from_tb,
+        where = whereConditions).eval()
+
+    pred = unifiedCall(funcByName(factorName), (model_path, rawData))
+    
+    copydata = rawData
+    copydata['factorname'] = factorName
+    copydata['value'] = pred
+    finalCols = [sqlCol(tradetimeName, alias=`tradetime), sqlCol(securityidName, alias=`securityid), sqlCol(`factorname), sqlCol(`value)]
+    return sql(finalCols, copydata).eval()
+}
