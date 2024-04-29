@@ -1,0 +1,720 @@
+
+
+// *****************************************
+//        聚合函数定义
+// *****************************************
+defg extractVolume(vol, side, buy_flag=1){
+    // buy_flag的取值有-1， 0， 1
+    // 值为0时计算的是总量
+    // 值为1时计算的是买
+    // 值为-1时计算的是卖
+    if (buy_flag == 0) {
+        w = each(def(m)->1, side)
+    } else if (buy_flag == 1) {
+        w = each(int, side=='B')
+    } else if (buy_flag == -1) {
+        w = each(int, side=='S')
+    }
+    return wsum(vol, w)
+}
+
+defg extractPrice(price, vol, side, buy_flag=0){
+    // buy_flag的取值有-1， 0， 1
+    // 值为0时计算的是所有委托价格
+    // 值为1时计算的是委托买单价格
+    // 值为-1时计算的是委托卖单价格
+    if (buy_flag == 0) {
+        w = each(def(m)->1, side)
+    } else if (buy_flag == 1) {
+        w = each(int, side=='B')
+    } else if (buy_flag == -1) {
+        w = each(int, side=='S')
+    }
+    w = vol * w
+    return wavg(price, w)
+}
+
+defg extractAmount(price, x, side, buy_flag=true){
+    if (buy_flag) {
+        w = each(int, side=='B')
+    } else {
+        w = each(int, side=='S')
+    }
+    w = w*x
+    return sum(w*price)
+}
+
+defg extractCount(side, buy_flag=true){
+    if (buy_flag) {
+        w = each(int, side=='B')
+    } else {
+        w = each(int, side=='S')
+    }
+    return sum(w)
+}
+
+defg extractRange(interval, side, buy_flag='B') {
+    index = (side==buy_flag)
+    new_interval = interval[index]
+    return max(new_interval) - min(new_interval)
+}
+
+defg extractMedian(interval, side, buy_flag='B') {
+    index = (side==buy_flag)
+    new_interval = interval[index]
+    return med(new_interval)
+}
+
+defg extractTimeStd(interval, side, buy_flag='B') {
+    index = (side==buy_flag)
+    new_interval = interval[index]
+    return std(new_interval)
+}
+
+defg extractPriceStd(price, side, buy_flag=0){
+    // buy_flag的取值有-1， 0， 1
+    // 值为0时计算的是所有委托价格标准差
+    // 值为1时计算的是委托买单价格标准差
+    // 值为-1时计算的是委托卖单价格标准差
+    if (buy_flag == 0) {
+        w = each(x->true, side)
+    } else if (buy_flag == 1) {
+        w = (side=='B')
+    } else if (buy_flag == -1) {
+        w = (side=='S')
+    }
+    new_price = price[w]
+    return new_price.std()
+}
+
+defg getTradeMoneyByDirectionAndSource(money, source, source_flag=1) {
+    // source_flag = 1, 机构， 单笔成交额在100万以上
+    // source_flag = 2, 主力， 单笔成交额在20万以上 100万(含)以下
+    // source_flag = 3, 大户， 单笔成交额在4万以上 20万(含)以下
+    // source_flag = 4, 散户， 单笔成交额在4万(含)以下
+    w_source = (source==source_flag)
+    return sum(money[w_source])
+}
+
+defg getActiveTradeMoneyByDirectionAndSource(money, side, source, buy_flag="B", source_flag=1) {
+    // 资金的主动买卖金额
+    // source_flag = 1, 机构， 单笔成交额在100万以上
+    // source_flag = 2, 主力， 单笔成交额在20万以上 100万(含)以下
+    // source_flag = 3, 大户， 单笔成交额在4万以上 20万(含)以下
+    // source_flag = 4, 散户， 单笔成交额在4万(含)以下
+    w_side = (side == buy_flag)
+    w_source = (source==source_flag)
+    return sum(money[w_source and w_side])
+}
+go;
+
+// *****************************************
+//        数据的输入，整理，输出等相关函数
+// *****************************************
+
+
+
+/**
+* This function writes the input log to a log file and prints it to the console.
+*
+* @param log: STRING, representing the log message to be written and printed.
+*/
+def writeLogAndPrint(log){
+    writeLog(log)
+    print(log)
+}
+
+
+def cutList(data_list, part_num){
+    total_size = data_list.size()
+    parallel = min(total_size, part_num)
+    num = total_size / parallel 
+    cond = total_size % parallel
+    points = iterate(0, 1, take(num+1, cond+1) <- take(num, parallel-cond-1))
+    return cut(data_list, points-points[0])
+}
+
+
+def getSplittedCodes(dbName, tbName, date_colname, one_date, num=4) {
+    // 筛选条件
+    whereConditions = [expr(one_date, <=, sqlCol(date_colname, date), <=, one_date)]
+    whereConditions.append!(parseExpr("security_code not like '90%'"))
+    whereConditions.append!(parseExpr("security_code not like '20%'"))
+    
+    cols = [sqlColAlias(<distinct security_code>)]
+    codes_list = sql(cols, from=loadTable(dbName, tbName), where=whereConditions, exec=true).eval()
+    return cutList(codes_list, num)
+}
+
+def pactchInDB(t,n,patch,allNum,dbName,tbName)
+{
+    print `正在处理第+string(n)+`批次
+    // 确定第 n 批的开始位置
+    start = patch * n
+    // 确定结束位置，是总数量和n + 1批的较小值
+    num = iif(patch * (n + 1) < allNum,patch,allNum - patch * n)
+    // 提取数据
+    tmp1 = select * from t limit start, num
+    // 转换数据类型
+    // tranTmp = tranData(tmp1,date)
+    // 入库
+    loadTable(dbName,tbName).append!(tmp1)
+}
+
+/**
+* Transform the data before inserting into the database.
+*/
+def renderTransformedDataAll(dbName, tbName, mutable data){
+    print("haha=======")
+    // loadTable(dbName, tbName).append!(data)
+    // 指定每批导入的条数，样例数据 10万条 50MB，指定 100万 约 500MB
+    patch = 1000000
+    print `总共有+string(ceil(data.size()\patch))+`批次数据需要处理
+    // 分批保存数据
+    loop(pactchInDB{data,,patch,data.size(),dbName ,tbName},0..(ceil(data.size()\patch) - 1))
+    data = NULL
+    print "finished!"
+    // 手动清除TSDB占用的缓冲，否则系统10min调用一次
+    flushTSDBCache()
+}
+
+// 提取快照信息
+def doAggSnapCrossSectionForCodes(dbName, tbName, dateStart, dateEnd, window_size, codes, snapDbName, snapTbName, renderTransformedDataFunc){
+    // 根据原始3s快照信息聚合
+    // :param codes: 本批次处理的标的列表，考虑到快照的数据过大，因此我们按照标的划分为几部分，分别进行处理
+    // :param window_size: 将原始快照聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    
+    // 筛选条件
+    whereConditions = [expr(dateStart, <=, sqlCol("orig_time", date), <=, dateEnd)]
+    whereConditions.append!(expr(
+        09:30:00, <=, sqlCol("orig_time", time), <=, 11:30:00, ||,
+        13:00:00, <=, sqlCol("orig_time", time), <=, 15:00:00
+    ))
+    whereConditions.append!(expr(sqlCol("security_code"), in, codes))
+    
+    // ===将原始的表格中价量的单位进行调整
+    cols = [
+        sqlCol("market_type"), sqlCol("security_code"), sqlCol("orig_time"),
+        sqlColAlias(<last_price\pow(10,6)>, "last_price"), 
+        sqlColAlias(<bid_price\pow(10,6)>, "bid_price"), sqlColAlias(<offer_price\pow(10,6)>, "offer_price"), 
+        sqlColAlias(<bid_volume\pow(10,2)>, "bid_volume"), sqlColAlias(<offer_volume\pow(10,2)>, "offer_volume")
+    ]
+    snap_tb = sql(select=cols, from=loadTable(snapDbName, snapTbName), where=whereConditions).eval()
+
+    // ===提取特征
+    // 分组条件 
+    bar_str = "bar(orig_time, @period, 'right') as trade_time"
+    groupby = [sqlCol("security_code"), parseExpr(strReplace(bar_str, "@period", window_size))] 
+    
+    // 构造的特征列
+    cols = [
+        sqlColAlias(<last(offer_price)[0]>, "s1"), sqlColAlias(<last(offer_price)[4]>, "s5"), sqlColAlias(<last(offer_price)[9]>, "s10"),
+        sqlColAlias(<last(bid_price)[0]>, "b1"), sqlColAlias(<last(bid_price)[4]>, "b5"), sqlColAlias(<last(bid_price)[9]>, "b10"),
+        sqlColAlias(<sum(offer_volume[0])>, "sv1"), sqlColAlias(<sum(offer_volume[:5])>, "sv5"), sqlColAlias(<sum(offer_volume[:10])>, "sv10"),
+        sqlColAlias(<sum(bid_volume[0])>, "bv1"), sqlColAlias(<sum(bid_volume[:5])>, "bv5"), sqlColAlias(<sum(bid_volume[:10])>, "bv10"),
+        sqlColAlias(<sum((offer_price*offer_volume)[0])>, "ssv1"), sqlColAlias(<sum((offer_price*offer_volume)[:5])>, "ssv5"), sqlColAlias(<sum((offer_price*offer_volume)[:10])>, "ssv10"),
+        sqlColAlias(<sum((bid_price*bid_volume)[0])>, "bbv1"), sqlColAlias(<sum((bid_price*bid_volume)[:5])>, "bbv5"), sqlColAlias(<sum((bid_price*bid_volume)[:10])>, "bbv10"),
+        sqlColAlias(<double(sum(bid_volume[:1]) - sum(offer_volume[:1]))/(sum(bid_volume[:1]) + sum(offer_volume[:1]))>, "wb1"), 
+        sqlColAlias(<double(sum(bid_volume[:5]) - sum(offer_volume[:5]))/(sum(bid_volume[:5]) + sum(offer_volume[:5]))>, "wb5"), 
+        sqlColAlias(<double(sum(bid_volume[:10]) - sum(offer_volume[:10]))/(sum(bid_volume[:10]) + sum(offer_volume[:10]))>, "wb10"),
+        sqlColAlias(<(last(offer_price)[0]+last(bid_price)[0])/2>, "bs_avg_price")
+    ]
+    features = sql(select=cols, from=snap_tb, where=whereConditions, groupBy=groupby, groupFlag=1).eval()
+    writeLogAndPrint(select * from features limit 2)
+    writeLogAndPrint("==========================")
+    renderTransformedDataFunc(dbName, tbName, features)
+}
+
+
+// 提取成交信息
+def doAggTradeCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, window_size, codes, fromDbNameDict, fromTbNameDict, renderTransformedDataFunc){
+    // 根据逐笔成交信息聚合
+    // :param codes: 本批次处理的标的列表，考虑到快照的数据过大，因此我们按照标的划分为几部分，分别进行处理
+    // :param window_size: 将逐笔信息聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    enDbName, enTbName = fromDbNameDict["entrust"], fromTbNameDict["entrust"]
+    tdDbName, tdTbName = fromDbNameDict["trade"], fromTbNameDict["trade"]
+    
+    // ===1. 获取逐笔成交信息
+    // 筛选条件
+    whereConditions = [expr(dateStart, <=, sqlCol("exec_time", date), <=, dateEnd)]
+    whereConditions.append!(expr(
+        09:30:00, <=, sqlCol("exec_time", time), <=, 11:30:00, ||,
+        13:00:00, <=, sqlCol("exec_time", time), <=, 15:00:00
+    ))
+    whereConditions.append!(expr(sqlCol("security_code"), in, codes))
+    whereConditions.append!(parseExpr("exec_type != `4")) // 去除掉撤单信息（这部分信息会单独处理）
+    
+    // ===将原始的表格中价量的单位进行调整
+    keep_cols = sqlCol((set(colNames(loadTable(tdDbName, tdTbName))) - set("exec_price" "exec_volume" "value_trade")).keys())
+    cols = [
+        sqlColAlias(<exec_price\pow(10,6)>, "exec_price"), sqlColAlias(<exec_volume\pow(10,2)>, "exec_volume"),
+        sqlColAlias(<value_trade\pow(10,5)>, "value_trade"),
+        sqlColAlias(<date(exec_time) as exec_date>)
+    ]
+    for (col in keep_cols){
+        cols.append!(col)
+    }
+    trade_tb = sql(select=cols, from=loadTable(tdDbName, tdTbName), where=whereConditions).eval()
+
+    // ===2.提取特征
+    // 分组条件 
+    bar_str = "bar(exec_time, @period, 'right') as trade_time"
+    groupby = [sqlCol("security_code"), parseExpr(strReplace(bar_str, "@period", window_size))] 
+    
+    // 构造的特征列
+    cols = [
+        sqlColAlias(<first(exec_price)>, 'open'), sqlColAlias(<last(exec_price)>, 'close'), sqlColAlias(<max(exec_price)>, 'high'), sqlColAlias(<min(exec_price)>, 'low'), 
+        sqlColAlias(<extractCount(side, true)>, 'td_buy_num'), sqlColAlias(<extractCount(side, false)>, 'td_sell_num'),
+        sqlColAlias(<extractVolume(exec_volume, side, 1)>, 'td_buy_vol'), sqlColAlias(<extractVolume(exec_volume, side, -1)>, 'td_sell_vol'), 
+        sqlColAlias(<extractPrice(exec_price, exec_volume, side, 1)>, 'td_buy_price'), sqlColAlias(<extractPrice(exec_price, exec_volume, side, -1)>, 'td_sell_price'), 
+        sqlColAlias(<extractPriceStd(exec_price, side, 1)>, 'td_buy_price_std'), sqlColAlias(<extractPriceStd(exec_price, side, -1)>, 'td_sell_price_std'),
+        sqlColAlias(<extractVolume(exec_volume, side, 0)>, 'td_vol'),
+        sqlColAlias(<extractPrice(exec_price, exec_volume, side, 0)>, 'vwap'),
+        sqlColAlias(<extractPriceStd(exec_price, side, 0)>, 'td_price_std')
+    ]
+    features_pv = sql(select=cols, from=trade_tb, where=whereConditions, groupBy=groupby, groupFlag=1).eval()
+    
+    
+    // ===3.根据资金规模获取的信息特征
+    // 整理委托数据（不包含撤单）
+    whereConditions = [expr(dateStart, <=, sqlCol("order_time", date), <=, dateEnd)]
+    whereConditions.append!(parseExpr("order_type!=`D"))
+    whereConditions.append!(expr(sqlCol("security_code"), in, codes))
+    
+    keep_cols = sqlCol((set(colNames(loadTable(enDbName, enTbName))) - set("order_price" "order_volume")).keys())
+    cols = [
+        sqlColAlias(<order_price\pow(10,6)>, "order_price"), sqlColAlias(<order_volume\pow(10,2)>, "order_volume"),
+        sqlColAlias(<date(order_time)>, "exec_date")
+    ]
+    for (col in keep_cols){
+        cols.append!(col)
+    }
+    all_entrust_tb = sql(select=cols, from=loadTable(enDbName, enTbName), where=whereConditions).eval()
+    
+    // 成交买单来源
+    updates_cols = [
+        <order_price as order_buy_price>,
+        <order_volume as order_buy_volume>,
+        <order_price*order_volume as order_buy_money>
+    ]
+    sqlUpdate(table=trade_tb, updates=updates_cols, from=<lj(trade_tb, all_entrust_tb, `security_code`exec_date`bid_appl_seq_num, `security_code`exec_date`appl_seq_num)>).eval()
+    // 成交卖单来源
+    updates_cols = [
+        <order_price as order_sell_price>,
+        <order_volume as order_sell_volume>,
+        <order_price*order_volume as order_sell_money>
+    ]
+    sqlUpdate(table=trade_tb, updates=updates_cols, from=<lj(trade_tb, all_entrust_tb, `security_code`exec_date`offer_appl_seq_num, `security_code`exec_date`appl_seq_num)>).eval()
+    
+    sqlUpdate(table=trade_tb, updates=[<1 as buy_source>]).eval()
+    sqlUpdate(table=trade_tb, updates=[<1 as buy_source>], where=[<order_buy_money > 100*pow(10,4)>]).eval()
+    sqlUpdate(table=trade_tb, updates=[<2 as buy_source>], where=[<order_buy_money > 20*pow(10,4) and order_buy_money <= 100*pow(10,4) >]).eval()
+    sqlUpdate(table=trade_tb, updates=[<3 as buy_source>], where=[<order_buy_money > 4*pow(10,4) and order_buy_money <= 20*pow(10,4) >]).eval()
+    sqlUpdate(table=trade_tb, updates=[<4 as buy_source>], where=[<order_buy_money <= 4*pow(10,4)>]).eval()
+
+    sqlUpdate(table=trade_tb, updates=[<1 as sell_source>]).eval()
+    sqlUpdate(table=trade_tb, updates=[<1 as sell_source>], where=[<order_sell_money > 100*pow(10,4)>]).eval()
+    sqlUpdate(table=trade_tb, updates=[<2 as sell_source>], where=[<order_sell_money > 20*pow(10,4) and order_sell_money <= 100*pow(10,4)>]).eval()
+    sqlUpdate(table=trade_tb, updates=[<3 as sell_source>], where=[<order_sell_money > 4*pow(10,4) and order_sell_money <= 20*pow(10,4)>]).eval()
+    sqlUpdate(table=trade_tb, updates=[<4 as sell_source>], where=[<order_sell_money <= 4*pow(10,4)>]).eval()
+    
+    // "@source_@dir_money"  
+    source_names = {1:`enormous, 2:`large, 3:`middle, 4:`small}
+    directions = {"B": 'buy', "S": 'sell'}
+    sel_cols = []
+    for (s_k in source_names.keys()) {
+        for (d_k in directions.keys()) {
+            money = "value_trade"
+            if (d_k == "B") source = "buy_source" else source = "sell_source"
+            str = strReplace("getTradeMoneyByDirectionAndSource(@money, @source, @s_k)", '@money', money)
+            str = strReplace(str, '@source', source)
+            str = strReplace(str, '@s_k', s_k)
+            col_name = source_names[s_k] + "_" + directions[d_k] + "_money"
+            sel_cols.append!(sqlColAlias(parseExpr(str), col_name))
+        }
+    }
+    // "@source_@dir_active_money"
+    for (s_k in source_names.keys()) {
+        for (d_k in directions.keys()) {
+            money = "value_trade"
+            if (d_k == "B") source = "buy_source" else source = "sell_source"
+            str = strReplace("getActiveTradeMoneyByDirectionAndSource(@money, side, @source, '@d_k', @s_k)", "@money", money)
+            str = strReplace(str, '@source', source)
+            str = strReplace(str, '@d_k', d_k)
+            str = strReplace(str, '@s_k', s_k)
+            col_name = source_names[s_k] + "_" + directions[d_k] + "_active_money"
+            sel_cols.append!(sqlColAlias(parseExpr(str), col_name))
+        }
+    }
+    // "@source_@dir_vol" 
+    for (s_k in source_names.keys()) {
+        for (d_k in directions.keys()) {
+            money = "exec_volume"
+            if (d_k == "B") source = "buy_source" else source = "sell_source"
+            str = strReplace("getTradeMoneyByDirectionAndSource(@money, @source, @s_k)", '@money', money)
+            str = strReplace(str, '@source', source)
+            str = strReplace(str, '@s_k', s_k)
+            col_name = source_names[s_k] + "_" + directions[d_k] + "_vol"
+            sel_cols.append!(sqlColAlias(parseExpr(str), col_name))
+        }
+    }
+    // "@source_@dir_active_vol"
+    for (s_k in source_names.keys()) {
+        for (d_k in directions.keys()) {
+            money = "exec_volume"
+            if (d_k == "B") source = "buy_source" else source = "sell_source"
+            str = strReplace("getActiveTradeMoneyByDirectionAndSource(@money, side, @source, '@d_k', @s_k)", '@money', money)
+            str = strReplace(str, '@source', source)
+            str = strReplace(str, '@d_k', d_k)
+            str = strReplace(str, '@s_k', s_k)
+            col_name = source_names[s_k] + "_" + directions[d_k] + "_active_vol"
+            sel_cols.append!(sqlColAlias(parseExpr(str), col_name))
+        }
+    }
+    // 分组条件 
+    bar_str = "bar(exec_time, @period, 'right') as trade_time"
+    groupby = [sqlCol("security_code"), parseExpr(strReplace(bar_str, "@period", window_size))] 
+    features_source = sql(select=sel_cols, from=trade_tb, groupBy=groupby, groupFlag=1).eval()
+    
+    features = exec * from lj(features_pv, features_source, `security_code`trade_time)
+    writeLogAndPrint(select * from features limit 2)
+    writeLogAndPrint("==========================")
+    renderTransformedDataFunc(toDbName, toTbName, features)
+    
+}
+
+// 提取委托信息
+def doAggEntrustCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, window_size, codes, enDbName, enTbName, renderTransformedDataFunc){
+    // 根据逐笔委托信息聚合
+    // :param codes: 本批次处理的标的列表，考虑到快照的数据过大，因此我们按照标的划分为几部分，分别进行处理
+    // :param window_size: 将逐笔信息聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    
+    // 筛选条件
+    whereConditions = [expr(dateStart, <=, sqlCol("order_time", date), <=, dateEnd)]
+    whereConditions.append!(expr(
+        09:30:00, <=, sqlCol("order_time", time), <=, 11:30:00, ||,
+        13:00:00, <=, sqlCol("order_time", time), <=, 15:00:00
+    ))
+    whereConditions.append!(expr(sqlCol("security_code"), in, codes))
+    whereConditions.append!(parseExpr("order_type != `D")) // 去除掉撤单信息（这部分信息会单独处理）
+    
+    // ===将原始的表格中价量的单位进行调整
+    keep_cols = sqlCol((set(colNames(loadTable(enDbName, enTbName))) - set("order_price" "order_volume")).keys())
+    cols = [
+        sqlColAlias(<order_price\pow(10,6)>, "order_price"), sqlColAlias(<order_volume\pow(10,2)>, "order_volume")
+    ]
+    for (col in keep_cols){
+        cols.append!(col)
+    }
+    entrust_tb = sql(select=cols, from=loadTable(enDbName, enTbName), where=whereConditions).eval()
+
+    // ===提取特征
+    // 分组条件 
+    bar_str = "bar(order_time, @period, 'right') as trade_time"
+    groupby = [sqlCol("security_code"), parseExpr(strReplace(bar_str, "@period", window_size))] 
+    
+    // 构造的特征列
+    cols = [
+        sqlColAlias(<extractCount(side, true)>, "en_buy_num" ), sqlColAlias(<extractCount(side, false)>, "en_sell_num" ),
+        sqlColAlias(<extractVolume(order_volume, side, 1)>, "en_buy_vol"), sqlColAlias(<extractVolume(order_volume, side, -1)>, "en_sell_vol"),
+        sqlColAlias(<extractPrice(order_price, order_volume, side, 1)>, "en_buy_price"), sqlColAlias(<extractPrice(order_price, order_volume, side, -1)>, "en_sell_price"), 
+        sqlColAlias(<extractPriceStd(order_price, side, 1)>, "en_buy_price_std"),
+        sqlColAlias(<extractPriceStd(order_price, side, -1)>, "en_sell_price_std"),
+        sqlColAlias(<extractPriceStd(order_price, side, 0)>, "en_price_std")
+    ]
+    features = sql(select=cols, from=entrust_tb, where=whereConditions, groupBy=groupby, groupFlag=1).eval()
+    writeLogAndPrint(select * from features limit 2)
+    writeLogAndPrint("==========================")
+    renderTransformedDataFunc(toDbName, toTbName, features)    
+}
+
+
+def extractCancelOrderFeature(table, window_size) {
+    // ===提取特征
+    // 分组条件 
+    bar_str = "bar(exec_time, @period, 'right') as trade_time"
+    groupby = [sqlCol("security_code"), parseExpr(strReplace(bar_str, "@period", window_size))] 
+    
+    // 构造的特征列
+    cols = [
+        sqlColAlias(<extractCount(side, true)>, "cancel_buy_num"), sqlColAlias(<extractCount(side, false)>, "cancel_sell_num"), 
+        sqlColAlias(<extractVolume(order_volume, side, 1)>, "cancel_buy_vol"), sqlColAlias(<extractVolume(order_volume, side, -1)>, "cancel_sell_vol"),
+        sqlColAlias(<extractAmount(order_price, order_volume, side, true)>, "cancel_buy_money"), sqlColAlias(<extractAmount(order_price, order_volume, side, false)>, "cancel_sell_money"),
+        sqlColAlias(<extractRange(cancel_interval, side, 'B')>, "cancel_buy_time_range"), sqlColAlias(<extractRange(cancel_interval, side, 'S')>, "cancel_sell_time_range"), 
+        sqlColAlias(<extractMedian(cancel_interval, side, 'B')>, "cancel_buy_time_med"), sqlColAlias(<extractMedian(cancel_interval, side, 'S')>, "cancel_sell_time_med"), 
+        sqlColAlias(<extractTimeStd(cancel_interval, side, 'B')>, "cancel_buy_time_std"), sqlColAlias(<extractTimeStd(cancel_interval, side, 'S')>, "cancel_sell_time_std")
+    ]
+    features = sql(select=cols, from=table, groupBy=groupby, groupFlag=1).eval()
+    return features
+}
+
+
+// 提取撤单信息
+def doAggCancelCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, window_size, codes, fromDbNameDict, fromTbNameDict, renderTransformedDataFunc) {
+    // 根据逐笔委托信息聚合
+    // :param codes: 本批次处理的标的列表，考虑到快照的数据过大，因此我们按照标的划分为几部分，分别进行处理
+    // :param window_size: 将逐笔信息聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    enDbName, enTbName = fromDbNameDict["entrust"], fromTbNameDict["entrust"]
+    tdDbName, tdTbName = fromDbNameDict["trade"], fromTbNameDict["trade"]
+    
+    // ===整理委托数据
+    whereConditions = [expr(dateStart, <=, sqlCol("order_time", date), <=, dateEnd)]
+    whereConditions.append!(expr(sqlCol("security_code"), in, codes))
+    
+    keep_cols = sqlCol((set(colNames(loadTable(enDbName, enTbName))) - set("order_price" "order_volume")).keys())
+    cols = [
+        sqlColAlias(<order_price\pow(10,6)>, "order_price"), sqlColAlias(<order_volume\pow(10,2)>, "order_volume"),
+        sqlColAlias(<date(order_time)>, "exec_date")
+    ]
+    for (col in keep_cols){
+        cols.append!(col)
+    }
+    
+    all_entrust_tb = sql(select=cols, from=loadTable(enDbName, enTbName), where=whereConditions).eval()
+    
+    // 撤单信息（上海）
+    whereConditions = [parseExpr("order_type=`D")]
+    whereConditions.append!(expr(
+        09:30:00, <=, sqlCol("order_time", time), <=, 11:30:00, ||,
+        13:00:00, <=, sqlCol("order_time", time), <=, 15:00:00
+    ))
+    keep_cols = sqlCol((set(colNames(all_entrust_tb)) - "order_time").keys())
+    cols = [
+        sqlColAlias(<order_time>, "exec_time")
+    ]
+    for (col in keep_cols){
+        cols.append!(col)
+    }
+    cancelOrd_sh_tb = sql(select=cols, from=all_entrust_tb, where=whereConditions).eval()
+    // 委托信息（不含撤单）
+    whereCondition = parseExpr("order_type!=`D")
+    entrust_tb = sql(select=sqlCol("*"), from=all_entrust_tb, where=whereCondition).eval()
+    
+    
+    // ===整理成交数据
+    whereConditions = [expr(dateStart, <=, sqlCol("exec_time", date), <=, dateEnd)]
+    whereConditions.append!(expr(
+        09:30:00, <=, sqlCol("exec_time", time), <=, 11:30:00, ||,
+        13:00:00, <=, sqlCol("exec_time", time), <=, 15:00:00
+    ))
+    whereConditions.append!(expr(sqlCol("security_code"), in, codes))
+    whereConditions.append!(parseExpr("exec_type=`4")) // 只保留撤单信息
+    
+    keep_cols = sqlCol((set(colNames(loadTable(tdDbName, tdTbName))) - set("exec_volume" "side")).keys())
+    cols = [
+        sqlColAlias(<exec_volume\pow(10,2)>, "exec_volume"),
+        sqlColAlias(<date(exec_time)>, "exec_date")
+    ]
+    for (col in keep_cols){
+        cols.append!(col)
+    }
+    // 撤单信息(深圳)
+    cancelOrd_sz_tb = sql(select=cols, from=loadTable(tdDbName, tdTbName), where=whereConditions).eval()
+    
+    // ===提取特征
+    // 深圳
+    sqlUpdate(table=cancelOrd_sz_tb, updates=[<0 as match_seq_num>]).eval()
+    sqlUpdate(table=cancelOrd_sz_tb, updates=[<offer_appl_seq_num as match_seq_num>], where=<bid_appl_seq_num==0>).eval()
+    sqlUpdate(table=cancelOrd_sz_tb, updates=[<bid_appl_seq_num as match_seq_num>], where=<offer_appl_seq_num==0>).eval()
+    updates_cols = [
+        <order_price as order_price>,
+        <order_volume as order_volume>,
+        <exec_time-order_time as cancel_interval>,
+        <side as side>
+    ]
+    sqlUpdate(table=cancelOrd_sz_tb, updates=updates_cols, from=<lj(cancelOrd_sz_tb, entrust_tb, `security_code`exec_date`match_seq_num, `security_code`exec_date`appl_seq_num)>).eval()
+    if ((exec count(*) from cancelOrd_sz_tb) > 0){
+        features_sz = extractCancelOrderFeature(cancelOrd_sz_tb, window_size)
+        writeLogAndPrint(select * from features_sz limit 2)
+        writeLogAndPrint("==========================")
+        renderTransformedDataFunc(toDbName, toTbName, features_sz) 
+    }
+    
+    // 上海
+    updates_cols = [
+        <order_price as order_price>,
+        <order_volume as order_volume>,
+        <exec_time-order_time as cancel_interval>
+    ]
+    sqlUpdate(table=cancelOrd_sh_tb, updates=updates_cols, from=<lj(cancelOrd_sh_tb, entrust_tb, `security_code`exec_date`orig_order_no, `security_code`exec_date`orig_order_no)>).eval()
+    if ((exec count(*) from cancelOrd_sh_tb) > 0){
+        features_sh = extractCancelOrderFeature(cancelOrd_sh_tb, window_size)
+        renderTransformedDataFunc(toDbName, toTbName, features_sh) 
+    }
+    
+}
+
+
+
+// 由单表整理信息
+def doAggCrossSection(toDbName, toTbName, date_colname, dateStart, dateEnd, window_size, codes_split_num, fromDbName, fromTbName, doAggFunc, renderTransformedDataFunc){
+    // 根据原始信息聚合 （考虑到快照的数据过大，因此我们按照标的划分为几部分，分别进行处理）
+    // :param window_size: 将原始快照聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    index = 0
+    // codes = ["000014"]
+    for (codes in getSplittedCodes(fromDbName, fromTbName, date_colname, dateStart, num=codes_split_num)) {
+        index += 1
+        print("index: " + string(index))
+        doAggFunc(toDbName, toTbName, dateStart, dateEnd, window_size, codes, fromDbName, fromTbName, renderTransformedDataFunc)
+    }
+}
+
+// 由多表整理信息
+def doMultiTableAggCrossSection(toDbName, toTbName, dateStart, dateEnd, window_size, codes_split_num, fromDbNameDict, fromTbNameDict, doAggFunc, renderTransformedDataFunc){
+    // 根据原始信息聚合 （考虑到快照的数据过大，因此我们按照标的划分为几部分，分别进行处理）
+    // :param window_size: 将原始快照聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    index = 0
+    // codes = ["000014"]
+    for (codes in getSplittedCodes(fromDbNameDict['entrust'], fromTbNameDict['entrust'], 'order_time', dateStart, num=codes_split_num)) {
+        index += 1
+        print("index: " + string(index))
+        doAggFunc(toDbName, toTbName, dateStart, dateEnd, window_size, codes, fromDbNameDict, fromTbNameDict, renderTransformedDataFunc)
+    }
+}
+
+
+def submitAggCrossSectionJob(toDbName, toTbName, date_colname, dateStart, dateEnd, window_size, codes_split_num, fromDbName, fromTbName, doAggFunc, renderTransformedDataFunc){
+    dlid = rand(uuid(), 1)[0]
+    createTime = now()
+    user = getCurrentSessionAndUser()[1]
+    jobDes= user + " " + syntax(doAggFunc).split("(")[0] + toDbName + ":" + toTbName + ":" + temporalFormat(dateStart, 'yyyyMMdd') + "->" + temporalFormat(dateEnd, 'yyyyMMdd') + " "+string(now())
+    jobId = user + "_" + concat((string(now()).regexReplace(":", "")).split("."), "_") + "_" + string(dlid).regexReplace("-", "_")
+    jobId = submitJob(jobId, jobDes, doAggCrossSection{toDbName, toTbName, date_colname, dateStart, dateEnd, window_size, codes_split_num, fromDbName, fromTbName, doAggFunc, renderTransformedDataFunc})
+    writeLogAndPrint("Server S0200 FACPLF: Job '" + jobId + "' submitted successfully.")
+    return jobId
+}
+
+def submitMultiTableAggCrossSectionJob(toDbName, toTbName, dateStart, dateEnd, window_size, codes_split_num, fromDbNameDict, fromTbNameDict, doAggFunc, renderTransformedDataFunc) {
+    dlid = rand(uuid(), 1)[0]
+    createTime = now()
+    user = getCurrentSessionAndUser()[1]
+    jobDes= user + " " + syntax(doAggFunc).split("(")[0] + toDbName + ":" + toTbName + ":" + temporalFormat(dateStart, 'yyyyMMdd') + "->" + temporalFormat(dateEnd, 'yyyyMMdd') + " "+string(now())
+    jobId = user + "_" + concat((string(now()).regexReplace(":", "")).split("."), "_") + "_" + string(dlid).regexReplace("-", "_")
+    jobId = submitJob(jobId, jobDes, doMultiTableAggCrossSection{toDbName, toTbName, dateStart, dateEnd, window_size, codes_split_num, fromDbNameDict, fromTbNameDict, doAggFunc, renderTransformedDataFunc})
+    writeLogAndPrint("Server S0200 FACPLF: Job '" + jobId + "' submitted successfully.")
+    return jobId
+}
+
+// *****************************************
+//        库表中列名和类型的定义
+// *****************************************
+
+
+def renderSchemaTbSnapCrossSection(){
+    col_names = ["security_code", "trade_time"]
+    
+    num_list = 1 5 10
+    str_list = "s@n" "b@n" "sv@n_sum" "bv@n_sum" "bbv@n_sum" "ssv@n_sum" "wb@n"
+    for (str in str_list) {
+        for (i in num_list) {
+            col_names.append!(strReplace(str, "@n", string(i)))
+        }
+    }
+    col_names.append!("bs_avg_price")
+    
+    col_types = `SYMBOL`TIMESTAMP
+    col_types.append!(take("DOUBLE", 2*3)) // s1,5,10 b1,5,10系列
+    col_types.append!(take("DOUBLE", 2*3)) // sv1,5,10 bv1,5,10系列
+    col_types.append!(take("DOUBLE", 3*3)) // (ssv/bbv/wb)1,5,10系列
+    col_types.append!(DOUBLE)
+    return table(1:0, col_names, col_types)
+} 
+
+def renderSchemaTbTradeCrossSection() {
+    col_names = ["security_code", "trade_time", "open", "close", "high", "low"]
+    dir_list = "buy" "sell"
+    str_list = "td_@dir_num" "td_@dir_vol" "td_@dir_price" "td_@dir_price_std"
+    for (str in str_list) {
+        for (dir in dir_list) {
+            col_names.append!(strReplace(str, "@dir", dir))
+        }
+    }
+    col_names = col_names <- ["td_vol", "vwap", "td_price_std"]
+    // 资金来源
+    source_list = ["enormous", "large", "middle", "small"]
+    str_list = "@source_@dir_money" "@source_@dir_active_money" "@source_@dir_vol" "@source_@dir_active_vol"
+    for (str in str_list) {
+        for (source in source_list) {
+            for (dir in dir_list) {
+                tmp_str = str.copy()
+                tmp_str = strReplace(tmp_str, "@source", source)
+                tmp_str = strReplace(tmp_str, "@dir", dir)
+                col_names.append!(tmp_str)
+            }
+        }
+    } 
+    
+    col_types = `SYMBOL`TIMESTAMP
+    col_types.append!(take("DOUBLE", 4)) // open close high low
+    col_types.append!(take("LONG", 2*1)) // en_@dir_num
+    col_types.append!(take("DOUBLE", 2*3)) // en_@dir_vol en_@dir_price en_@dir_price_std 
+    col_types.append!( take("DOUBLE", 3) ) // "td_vol", "vwap", "td_price_std"
+    col_types.append!( take("DOUBLE", 2*4*4)) // "@source_@dir_money" "@source_@dir_active_money" "@source_@dir_vol" "@source_@dir_active_vol"
+    return table(1:0, col_names, col_types)
+}
+
+def renderSchemaTbEntrustCrossSection() {
+    col_names = ["security_code", "trade_time"]
+    dir_list = "buy" "sell"
+    str_list = "en_@dir_num" "en_@dir_vol" "en_@dir_price" "en_@dir_price_std"
+    for (str in str_list) {
+        for (dir in dir_list) {
+            col_names.append!(strReplace(str, "@dir", dir))
+        }
+    }
+    col_names.append!("en_price_std")
+    
+    col_types = `SYMBOL`TIMESTAMP
+    col_types.append!(take("LONG", 2*1)) // en_@dir_num
+    col_types.append!(take("DOUBLE", 2*3)) // en_@dir_vol en_@dir_price en_@dir_price_std 
+    col_types.append!("DOUBLE") // en_price_std
+    return table(1:0, col_names, col_types)
+}
+
+def renderSchemaTbCancelOrderCrossSection(){
+    col_names = ["security_code", "trade_time"]
+    dir_list = "buy" "sell"
+    str_list = "cancel_@dir_num" "cancel_@dir_vol" "cancel_@dir_money" "cancel_@dir_time_range" "cancel_@dir_time_med" "cancel_@dir_time_std"
+    for (str in str_list) {
+        for (dir in dir_list) {
+            col_names.append!(strReplace(str, "@dir", dir))
+        }
+    }
+    
+    col_types = `SYMBOL`TIMESTAMP
+    col_types.append!(take("LONG", 2*1)) // cancel_@dir_num
+    col_types.append!(take("DOUBLE", 2*5)) // "cancel_@dir_vol" "cancel_@dir_money" "cancel_@dir_time_range" "cancel_@dir_time_med" "cancel_@dir_time_std"
+    return table(1:0, col_names, col_types)
+}
+
+
+
+// *****************************************
+//        数据库的创建
+// *****************************************
+
+def createDatabaseCrossSection(dbName){
+    db1 = database(, VALUE, 2023.04.01..2023.05.01)
+    db2 = database(, HASH, [SYMBOL, 10])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+
+// *****************************************
+//        数据表的创建
+// *****************************************
+
+def createTableSnapCrossSection(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbSnapCrossSection(), tableName=tbName, partitionColumns=`trade_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`trade_time, keepDuplicates=LAST)
+}
+
+def createTableTradeCrossSection(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbTradeCrossSection(), tableName=tbName, partitionColumns=`trade_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`trade_time, keepDuplicates=LAST)
+}
+
+def createTableEntrustCrossSection(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbEntrustCrossSection(), tableName=tbName, partitionColumns=`trade_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`trade_time, keepDuplicates=LAST)
+}
+
+def createTableCancelOrderCrossSection(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbCancelOrderCrossSection(), tableName=tbName, partitionColumns=`trade_time`security_code, compressMethods={TradeTime:"delta"}, sortColumns=`security_code`trade_time, keepDuplicates=LAST)
+}

@@ -1,0 +1,31 @@
+def createSnapCrossSec(dbName, tbName, startDate, endDate, window_size, threadNum, snapDbName, snapTbName, initDb=false, initTb=false){
+    // :param window_size: 将原始快照聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    // 该模板为用户创建分钟级别K线图
+    jobIdlist = []
+    
+    if (startDate > endDate) {
+        throw "参数startDate 必须小于等于 参数endDate!"
+    }
+    // 创建数据库和分布式表
+    CSVDataModule::createDBAndTable(dbName, tbName, initDb, initTb, ExtractFeatureModule::createDatabaseCrossSection, ExtractFeatureModule::createTableSnapCrossSection)
+    
+    // 以threadNum切分任务
+    days = endDate - startDate + 1
+    cutPosList = CSVDataModule::cutList(days, threadNum)
+    
+    // codes = `000014`000015
+    periods  = cut(startDate..endDate, cutPosList)
+    codes_split_num = 10
+    for (period in periods){
+        // for (codes in ExtractFeatureModule::getSplittedCodes(snapDbName, snapTbName, period.head(), num=10)) {
+            jobId = ExtractFeatureModule::submitAggCrossSectionJob(dbName, tbName, 'orig_time', period.head(), period.tail(), window_size, codes_split_num, snapDbName, snapTbName, ExtractFeatureModule::doAggSnapCrossSectionForCodes, CSVDataModule::renderTransformedDataAll)
+            
+            jobIdlist.append!(jobId)
+        // }
+    }
+
+    CSVDataModule::writeLogAndPrint("Server_S0001_FACPLF: All jobs submitted successfully.")
+
+    //返回任务ID为平台提供解析
+    return jobIdlist
+}

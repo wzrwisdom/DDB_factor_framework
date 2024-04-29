@@ -1,0 +1,34 @@
+def createTradeCrossSec(dbName, tbName, startDate, endDate, window_size, threadNum, fromDbNameStr, fromTbNameStr, initDb=false, initTb=false){
+    // :param window_size: 将原始快照聚合时滚动窗口大小的取值，可以是 6s, 1min等
+    // 该模板为用户创建分钟级别K线图
+    jobIdlist = []
+    
+    if (startDate > endDate) {
+        throw "参数startDate 必须小于等于 参数endDate!"
+    }
+    // 创建数据库和分布式表
+    CSVDataModule::createDBAndTable(dbName, tbName, initDb, initTb, ExtractFeatureModule::createDatabaseCrossSection, ExtractFeatureModule::createTableTradeCrossSection)
+    
+    // 以threadNum切分任务
+    days = endDate - startDate + 1
+    cutPosList = CSVDataModule::cutList(days, threadNum)
+    
+    // 整理输入所需的库表为字典
+    fromDbNameDict = parseExpr(fromDbNameStr).eval()
+    fromTbNameDict = parseExpr(fromTbNameStr).eval()
+    
+    periods  = cut(startDate..endDate, cutPosList)
+    codes_split_num = 10
+    for (period in periods){
+        // for (codes in ExtractFeatureModule::getSplittedCodes(tradeDbName, tradeTbName, period.head(), num=10)) {
+            jobId = ExtractFeatureModule::submitMultiTableAggCrossSectionJob(dbName, tbName, period.head(), period.tail(), window_size, codes_split_num, fromDbNameDict, fromTbNameDict, ExtractFeatureModule::doAggTradeCrossSectionForCodes, CSVDataModule::renderTransformedDataAll)
+            
+            jobIdlist.append!(jobId)
+        // }
+    }
+
+    CSVDataModule::writeLogAndPrint("Server_S0001_FACPLF: All jobs submitted successfully.")
+
+    //返回任务ID为平台提供解析
+    return jobIdlist
+}
