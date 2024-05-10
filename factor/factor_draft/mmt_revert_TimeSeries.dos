@@ -1,0 +1,19 @@
+def close_ret_1m_rank(trade_time, close_ret) {
+    return tmrank(trade_time, close_ret, ascending=true, window=1m, percent=true)
+}
+
+def intra_ret_1m_rank(trade_time, intra_ret) {
+    return tmrank(trade_time, intra_ret, ascending=true, window=1m, percent=true)
+}
+
+def intra_VP(trade_time, td_vol) {
+    return tmsum(trade_time, td_vol, 1m)/tmsum(trade_time, td_vol, 30m)
+}
+
+def close_ret_ema(close_ret) {
+    return ema(close_ret, 10, warmup=false)
+}
+
+def close_ret_10m_kurt(trade_time, close_ret) {
+    return tmkurtosis(trade_time, close_ret, 10m)
+}

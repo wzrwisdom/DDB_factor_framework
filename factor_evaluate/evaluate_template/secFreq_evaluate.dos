@@ -1,0 +1,87 @@
+def secFreq_evaluate(
+    dbNameStr, tbNameStr,
+    factorNamesStr, winsorFactorNamesStr,
+    mutable startDate, mutable endDate, 
+    mutable startTime, mutable endTime,
+    securityidColStr, tradetimeColStr,
+    factorColName, priceCol, facValColName,
+    group=5,
+    window=10,
+    zscore_flag=true,
+    long_short=true) {
+
+    // 解析字符串，转换成所需的信息
+    dbNameDict = parseExpr(dbNameStr).eval()
+    tbNameDict = parseExpr(tbNameStr).eval()
+    factorNamesDict = parseExpr(factorNamesStr).eval()
+    winsorFactorNamesDict = parseExpr(winsorFactorNamesStr).eval()
+    securityidDict = parseExpr(securityidColStr).eval()
+    tradetimeDict = parseExpr(tradetimeColStr).eval()
+
+    // 准备数据和配置
+    priceDbName, facDbName = dbNameDict['price'], dbNameDict['factor']
+    priceTbName, facTbName = tbNameDict['price'], tbNameDict['factor']
+
+    price_tb = loadTable(priceDbName, priceTbName)
+    fac_tb = loadTable(facDbName, facTbName)
+ 
+    factorNames = secFreq_eva_bt_lib::loadFactorName(factorNamesDict)
+    winsorFactorNames = secFreq_eva_bt_lib::loadFactorName(winsorFactorNamesDict)
+    
+    pric_secu_name, fac_secu_name = securityidDict['price'], securityidDict['factor']
+    pric_time_name, fac_time_name = tradetimeDict['price'], tradetimeDict['factor']
+    price_col_name, factor_col_name, fac_val_name = priceCol, factorColName, facValColName
+
+    startDate, endDate = temporalParse(startDate, "y.M.d"), temporalParse(endDate, "y.M.d")
+    startTime, endTime = temporalParse(startTime, "H:m:s"), temporalParse(endTime, "H:m:s")
+    
+    // 读取所选因子的数据
+    factorData = secFreq_eva_bt_lib::readFactorTable(fac_secu_name, fac_time_name, factor_col_name, fac_val_name, 
+        startDate, endDate, startTime, endTime, fac_tb, factorNames)
+    
+    // print(string(startDate) + " " + string(startTime))
+    // print(string(endDate) + " " + string(endDate))
+    // print(select * from price_tb limit 5)
+    // 读取收益标签数据
+    labelTable = secFreq_eva_bt_lib::calcLabel(price_col_name, pric_secu_name, pric_time_name, 
+        price_tb, startDate, endDate, startTime, endTime, window=window, z_flag=zscore_flag)
+    
+    // 可交易时间和股票
+    startTS = timestamp(string(startDate) + " " + string(startTime)) // 回测起始时间
+    endTS = timestamp(string(endDate) + " " + string(endTime)) // 回测截止时间
+    tradables = secFreq_eva_bt_lib::genTradables(price_tb, pric_secu_name, pric_time_name, startTS, endTS)
+    
+    // 按列合并因子数据
+    factorsTable = secFreq_eva_bt_lib::processAndMergeFactors(factorData, factorNames, winsorFactorNames, tradables, startDate, endDate, startTime, endTime, z_flag=zscore_flag)
+    // select * from factorsTable limit 10
+    
+    // 计算所有因子的IC相关的指标信息
+
+    factorNewNames = each(def(x):x.strReplace("::","__"), factorNames)
+    metricsTable, cumIC_result = secFreq_eva_bt_lib::evaluate_factors(factorNewNames, factorsTable, labelTable)
+
+    // 计算因子之间的相关性
+    corrTable = secFreq_eva_bt_lib::calFactorsCorrelation(factorNewNames, factorsTable)
+    
+    result = dict(STRING, ANY)
+    result['IC_metrics'] = metricsTable
+    result['cumIC'] = cumIC_result
+    result['corr'] = corrTable 
+    
+    // 获取股票的价格表
+    priceTable = secFreq_eva_bt_lib::loadPriceData(price_tb, pric_secu_name, pric_time_name, price_col_name,
+        startDate, endDate, startTime, endTime)
+    
+    factorName = factorNewNames[0]
+    
+    bt_result, pnl_summary = secFreq_eva_bt_lib::backtest_factors(factorNewNames, factorsTable, priceTable, startTS, endTS, window, group, long_short)
+    result['backtest_result'] = bt_result
+    result['pnl_summary'] = pnl_summary
+    
+    res = secFreq_eva_bt_lib::extractTables(result)
+    res['groups'] = dict(1..group, "group" + string(1..group))
+    res['groups'][0] = "hedge"
+    res['factors'] = factorNewNames
+    return res
+
+}

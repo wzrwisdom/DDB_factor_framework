@@ -1,0 +1,385 @@
+def extractTables(d) {
+    // Create a new dictionary to store the extracted tables
+    result = dict(STRING, ANY)
+    for(key in d.keys()) {
+        // Check if the current value is a dictionary
+        if (typestr(d[key]) like "%DICTIONARY") {
+            // If it is a dictionary, recursively call the function
+            nestedResult = extractTables(d[key]);
+            // Merge the results of the recursive call into the current results
+            for(nestedKey in nestedResult.keys()) {
+                result[nestedKey] = nestedResult[nestedKey];
+            }
+        } else {
+            // If the current value is a table, add it directly to the result dictionary
+            result[key] = d[key];
+        }
+    }
+    return result;
+}
+
+def calcIC(factorName, factorsTable, labelTable){
+	factorTable = sql(select=(sqlCol(`securityid),sqlCol(`tradetime),sqlCol(factorName,alias=`factor)), from=factorsTable).eval()
+	mergedTable = select * from lj(factorTable, labelTable, `securityid`tradetime) where isValid(factor) and isValid(label)
+	ICTable = sql(select=(
+		sqlColAlias(<corr(factor, label)>, `IC),
+		sqlColAlias(<spearmanr(factor, label)>, `RankIC)
+		), from=mergedTable, groupBy=sqlCol(`tradetime)).eval()
+	// CumICTable = sql(select=(
+	// 	sqlCol(`tradetime),
+	// 	sqlColAlias(<cumsum(IC)>, `CumIC),
+	// 	sqlColAlias(<cumsum(RankIC)>, `CumRankIC)
+	// 	), from=ICTable).eval()
+	return ICTable
+}
+
+def evaluateIC(ICTable, factorName){
+	metricTable = select string(factorName) as factor_code,
+	avg(IC) as mean_IC, avg(RankIC) as mean_RankIC, 
+	std(IC) as std_IC, std(RankIC) as std_RankIC,
+	avg(IC)/std(IC) as ICIR, avg(RankIC)/std(RankIC) as RankICIR
+	from ICTable
+
+	posICCount = exec double(count(IC)) from ICTable where IC>0
+	posRankICCount = exec double(count(RankIC)) from ICTable where RankIC>0
+	totalCount = exec double(count(*)) from ICTable
+
+	update metricTable set win_rate_IC=posICCount/totalCount
+	update metricTable set win_rate_RankIC=posRankICCount/totalCount
+
+	return metricTable
+}
+
+def calFactorsCorrelation(factorNames, factorsTable) {
+	num_factors = factorNames.size()
+	corr_list = []
+
+	corrTable = table(1:0, `factor_X`factor_Y`CORR, [STRING,STRING,DOUBLE])
+	for (i in 0..(num_factors-1)) {
+		tmp_list = []
+		for (j in 0..(num_factors-1)) {
+			fac_i, fac_j = factorNames[i], factorNames[j]
+			corr = sql(
+				select=(sqlColAlias(parseExpr("corr("+fac_i+","+fac_j+")"))),
+				from=factorsTable,
+				exec=true
+			).eval()
+			corrTable.append!(
+				table(fac_i as factor_X, fac_j as factor_Y, corr as CORR)
+			)
+		}
+	}
+	return corrTable
+}
+
+def evaluate_factor(factorName, factorsTable, labelTable) {
+    ICTable = calcIC(factorName, factorsTable, labelTable)
+	metricTable = evaluateIC(ICTable, factorName)
+    return metricTable, ICTable
+}
+
+def evaluate_factors(factorNames, factorsTable, labelTable) {
+    metricsTable = table(100:0, 
+        `factor_code`mean_IC`mean_RankIC`std_IC`std_RankIC`ICIR`RankICIR`win_rate_IC`win_rate_RankIC, 
+        [STRING,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE])
+    
+    cumIC_result = dict(STRING, ANY)
+    for (factorName in factorNames) {
+        metricTable, ICTable = evaluate_factor(factorName, factorsTable, labelTable)
+        metricsTable.append!(metricTable)
+        CumICTable = sql(select=(
+            sqlCol(`tradetime),
+            sqlColAlias(<cumsum(IC)>, `CumIC),
+            sqlColAlias(<cumsum(RankIC)>, `CumRankIC)
+            ), from=ICTable).eval()
+        cumIC_result['CumIC_Fac_'+factorName] = CumICTable
+    }
+
+    return metricsTable, cumIC_result
+}
+
+
+
+
+
+def getSingleFactor(inData, factor, startDate, endDate, startTime, endTime){
+	factorTable = select securityid, tradetime, value from inData where factorname=factor and date(tradetime) between startDate:endDate and second(tradetime) between startTime:endTime
+	return factorTable
+}
+
+def processFactor(factorTable, tradables, wins=true, z_flag=true){
+	processedFactorTable = select * from lj(tradables, factorTable, `securityid`tradetime)
+	if(wins){
+		processedFactorTable = select securityid, tradetime, winsorize(value, 0.05 0.05) as value from processedFactorTable context by tradetime  csort securityid
+	}
+	if(z_flag){
+		processedFactorTable = select securityid, tradetime, zscore(value) as value from processedFactorTable context by tradetime csort securityid
+	}
+	return processedFactorTable
+}
+
+def processAndMergeFactors(factorData, factorNameList, winsorFactorNameList, tradables, startDate, endDate, startTime, endTime, z_flag){
+	mergedFactorTable = tradables
+	for(factorName in factorNameList){
+		factorTable = getSingleFactor(factorData, factorName, startDate, endDate, startTime, endTime)
+		if(factorName in winsorFactorNameList){
+			processedFactorTable = processFactor(factorTable, tradables, z_flag=z_flag)
+		}
+		else{
+			processedFactorTable = processFactor(factorTable, tradables, wins=false, z_flag=z_flag)
+		}
+		factorName = factorName.strReplace("::", "__")
+		mergedFactorTable.update!(factorName, processedFactorTable.value)
+	}
+	// avg_factor = rowAvg(mergedFactorTable[factorNameList])
+	// update mergedFactorTable set avg=avg_factor
+	return mergedFactorTable
+}
+
+def createAndRenameCols(oldColNames, newColNames) {
+    return sqlColAlias(each(sqlCol, oldColNames), newColNames)
+}
+
+def genTradables(inData, pric_secu_name, pric_time_name, startTS, endTS){
+    col_names = [pric_secu_name, pric_time_name]
+    col_new_names = [`securityid, `tradetime]
+
+    cols = createAndRenameCols(col_names, col_new_names)
+    
+    whereConditions = [expr(sqlCol(pric_time_name), between, startTS, :, endTS)]
+    whereConditions.append!( expr(sqlCol("td_vol"), >, 0))
+    return sql(select=cols, from=inData, where=whereConditions,
+        orderBy=[sqlCol(pric_secu_name), sqlCol(pric_time_name)], ascOrder=1
+    ).eval()
+}
+
+def calcLabel(price_col_name, pric_secu_name, pric_time_name,
+    rawData, startDate, endDate, startTime, endTime, window, z_flag=true) {
+    close = sql(select=sqlCol(price_col_name, ffill), 
+        from=rawData, where=expr(sqlCol(pric_time_name, date), between, startDate, :, endDate),
+        groupBy=[sqlCol(pric_time_name), sqlCol(pric_secu_name)], groupFlag=2, exec=true).eval()
+
+    ret = close / mfirst(close, window) - 1  // 计算收益率
+    if (z_flag)  {
+        ret = flip(zscore(flip(ret)))  // 截面标准化
+        nullFill!(ret, 0)
+    }
+    ret = move(ret, -1*window+1)  // 向前平移
+    
+    retWide = table(ret.rowNames() as trade_time, ret)
+    retTable = retWide.unpivot(pric_time_name, retWide.colNames()[1:])
+
+    retTable.rename!(`valueType, `securityid)
+    retTable.rename!(pric_time_name, `tradetime)
+    retTable.rename!(`value, `label)
+    retTable = select * from retTable where second(tradetime) between startTime:endTime
+
+    return retTable
+}
+
+def loadFactorName(factorNamesDict){
+    factors = array(STRING)
+    if ((typestr factorNamesDict) == VOID) {
+        return factors
+    }
+    for (fac_module in factorNamesDict.keys()) {
+        cur_mod_factors = factorNamesDict[fac_module]
+        for (i_factor in cur_mod_factors) {
+            factor_name = fac_module + "::" + i_factor
+            factors.append!(factor_name)
+        }
+    }
+    return factors
+}
+
+
+
+def readFactorTable(fac_secu_name, fac_time_name, factor_col_name, fac_val_name, 
+    startDate, endDate, startTime, endTime, factor_table, factorNames) {
+    col_names = [fac_secu_name, fac_time_name, factor_col_name, fac_val_name]
+    col_new_names = [`securityid, `tradetime, `factorname, `value]
+
+    cols = createAndRenameCols(col_names, col_new_names)
+    
+    whereConditions = [expr(sqlCol(fac_time_name, date), between, startDate, :, endDate)]
+    whereConditions.append!(expr(sqlCol(fac_time_name, second), between, startTime, :, endTime))
+    whereConditions.append!( expr(sqlCol(factor_col_name), in, factorNames) )
+    return sql(select=cols, from=factor_table, where=whereConditions).eval()
+}
+
+def formPortfolioSingleGroup(startTS, endTS, factorName, factorsTable, holdingMins, groups, groupId, reverse=false){
+    factorTable = sql(select=(
+        sqlCol(`securityid),
+        sqlCol(`tradetime),
+        sqlCol(factorName,alias=`factor)),
+        from=factorsTable).eval()
+	
+	portTable = select securityid, tradetime,
+	rank(factor,,groups) as rank, count(securityid) as sym_count, 0.0 as wt 
+	from factorTable where tradetime between startTS : endTS 
+	context by tradetime having count(securityid)>=100
+	
+	if(reverse){
+		update portTable set wt = 1.0\count(securityid)\holdingMins where rank=groups-groupId-1 context by tradetime
+	}
+	else{
+		update portTable set wt = 1.0\count(securityid)\holdingMins where rank=groupId context by tradetime
+	}
+	return select securityid, tradetime as tranche, wt from portTable where wt != 0 order by securityid, tradetime
+}
+
+
+def calcPortPnL(stockPnL, colName){
+	return sql(select=(sqlColAlias(<sum(pnl)>, colName)), from=stockPnL, groupBy=sqlCol(`tradetime), orderBy=sqlCol(`tradetime)).eval()
+}
+
+def formPortfolioHedge(startTS, endTS, factorName, factorsTable, holdingMins, groups, reverse=false){
+	factorTable = sql(select=(
+		sqlCol(`securityid),
+		sqlCol(`tradetime),
+		sqlCol(factorName,alias=`factor)),
+		from=factorsTable).eval()
+	
+	portTable = select securityid, tradetime, 
+	rank(factor,,groups) as rank, count(securityid) as sym_count, 0.0 as wt 
+	from factorTable where tradetime between startTS : endTS 
+	context by tradetime having count(securityid)>=100
+	
+	if(reverse){
+		update portTable set wt = 1.0\count(securityid)\holdingMins where rank=0 context by tradetime
+		update portTable set wt = -1.0\count(securityid)\holdingMins where rank=groups-1 context by tradetime
+	}
+	else{
+		update portTable set wt = -1.0\count(securityid)\holdingMins where rank=0 context by tradetime
+		update portTable set wt = 1.0\count(securityid)\holdingMins where rank=groups-1 context by tradetime
+	}
+	return select securityid, tradetime as tranche, wt from portTable where wt != 0 order by securityid, tradetime
+}
+
+def evaluatePnL(portPnLTable, factorName, colName){
+	
+	PnLTable = sql(select=(sqlCol(`tradetime), sqlCol(colName, alias=`ret)), from=portPnLTable).eval()
+	CumPnLTable = select tradetime, cumprod(ret+1) as value from PnLTable
+
+	// 收益指标
+	metricTable = select string(factorName) as factor_code, string(colName) as port_name,
+	avg(ret) as mean_ret, std(ret) as std_ret, avg(ret)/std(ret) as sharpe_ratio
+	from PnLTable
+
+	// 胜率
+	posRetCount = exec double(count(ret)) from PnLTable where ret>0
+	totalCount = exec double(count(*)) from PnLTable
+	update metricTable set win_rate=posRetCount/totalCount
+
+	// 总收益
+	totalRet = exec last(value)-1 from CumPnLTable
+	update metricTable set total_ret=totalRet
+
+	// 回撤
+	update CumPnLTable set draw_down=exec (cummax(value)-value)/cummax(value) from CumPnLTable
+	update metricTable set max_draw_down=exec max(draw_down) from CumPnLTable
+
+	reorderColumns!(metricTable, `factor_code`port_name`total_ret`mean_ret`std_ret`sharpe_ratio`win_rate`max_draw_down)
+
+	return metricTable
+}
+
+
+def calcStockPnL(portTable, priceTable, holdingMins, endTS){
+	
+	// 收益率
+	retTable = select securityid, tradetime, ret as ret_ts from priceTable
+	
+	// 最后时刻截面
+	lastTSTable = select max(tradetime) as tradetime from priceTable group by securityid
+	lastTS = dict(lastTSTable.securityid, lastTSTable.tradetime)
+	
+	// 持仓时长
+	ages = table(1..holdingMins as age)
+
+	// 时刻截面
+	timeStamps = sort distinct portTable.tranche
+	tsCount=timeStamps.size()
+	dictTSIndex = dict(timeStamps, 1..tsCount)
+	dictIndexTS = dict(1..tsCount, timeStamps)
+    
+	// 创建持仓收益率表
+	pos = select dictIndexTS[dictTSIndex[tranche]+age] as tradetime, 
+        securityid, tranche, age, take(0.0,size age) as ret, 
+        wt as expr, take(0.0,size age) as pnl 
+        from cj(portTable,ages) 
+    where isValid(dictIndexTS[dictTSIndex[tranche]+age]), dictIndexTS[dictTSIndex[tranche]+age]<=min(lastTS[securityid], endTS)
+	
+	// 合并收益率，暴露，持仓收益
+	update pos set ret = ret_ts from ej(pos, retTable,`tradetime`securityid)
+	update pos set expr = expr*cumprod(1+ret) from pos context by securityid, tranche
+	update pos set pnl = expr*ret/(1+ret)
+	
+	return pos
+}
+
+
+def calPnL(factorName, port_name, factorsTable, priceTable, startTS, endTS, window, group, hedge_flag) {
+    if (hedge_flag) {
+        portTable = formPortfolioHedge(startTS, endTS, factorName, factorsTable, holdingMins=window, groups=group)
+        // stockPnl = calcStockPnL(portTable, priceTable, window, endTS)
+        // portPnL = calcPortPnL(stockPnl, factorName)
+        // metricTable = evaluatePnL(portPnL, factorName, factorName)
+        // update metricTable set port_name=`hedge
+    } else {
+        group_i = int(port_name.split("group")[1])
+        portTable = formPortfolioSingleGroup(startTS, endTS, factorName, factorsTable, window, group, groupId=group_i-1)
+    }
+    stockPnL = calcStockPnL(portTable, priceTable, window, endTS)
+    portPnL = calcPortPnL(stockPnL, port_name)
+    metricTable = evaluatePnL(portPnL, factorName, port_name)
+    return portPnL, metricTable
+}
+
+
+def backtest_factors(factorNames, factorsTable, priceTable, startTS, endTS, window, group, long_short) {
+
+    metricsTable = table(100:0, 
+        `factor_code`port_name`total_ret`mean_ret`std_ret`sharpe_ratio`win_rate`max_draw_down, 
+        [STRING,STRING,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE])
+    portPnLSummary = 0
+    for (factorName in factorNames) {
+        // factorName = factorNewNames[0]
+        if (long_short) {
+            // 多空对冲组收益
+            portPnL, metricTable = calPnL(factorName, "hedge", factorsTable, priceTable, startTS, endTS, window, group, hedge_flag=true)
+            portPnL.rename!(`hedge, factorName)
+            if(type(portPnLSummary)==4){
+                portPnLSummary = portPnL
+            }
+            else{
+                portPnLSummary = select * from lj(portPnLSummary, portPnL, `tradetime)
+            }
+            metricsTable.append!(metricTable)
+        }
+    
+        // 每组收益
+        for (i in 1..group) {
+            colName = "group" + string(i)
+            portPnL, metricTable = calPnL(factorName, colName, factorsTable, priceTable, startTS, endTS, window, group, hedge_flag=false)
+            metricsTable.append!(metricTable)
+        }
+    }
+    return metricsTable, portPnLSummary
+}
+
+def loadPriceData(price_tb, pric_secu_name, pric_time_name, price_col_name, 
+    startDate, endDate, startTime, endTime){
+    cols = [
+        sqlCol(pric_secu_name, alias="securityid"),
+        sqlCol(pric_time_name, alias="tradetime"),
+        sqlCol(price_col_name, ffill, "price"),
+        sqlCol("td_vol", alias="vol")
+    ]
+    priceTable = sql(select=cols, from=price_tb, where=expr(sqlCol(pric_time_name, date), between, startDate, :, endDate)).eval()
+    priceTable = select securityid, tradetime, vol, deltas(price)/price as ret from priceTable 
+        where isValid(price) and isValid(vol) context by securityid csort tradetime
+
+    priceTable = select * from priceTable where second(tradetime) between startTime:endTime
+	return priceTable
+}

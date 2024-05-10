@@ -1,0 +1,169 @@
+// 由于原始的逐笔信息整理的特征存放在宽表中，按照宽表的方式读取特征
+def getFeaturesFromWideTb(data, featureInfo, startDate, endDate, securityidName, tradetimeName, codes) {
+    
+    if (featureInfo.size() == 1 and featureInfo[0] == `all) {
+        selected_cols = set(data.columnNames())
+    } else if (featureInfo.size() > 0) {
+        selected_cols = set(featureInfo)
+    }
+    cols = []
+    cols.append!(sqlCol(securityidName, alias='securityid'))
+    cols.append!(sqlCol(tradetimeName, alias='tradetime'))
+
+    remain_cols = set(selected_cols) - set([securityidName, tradetimeName])
+    for (col in each(sqlCol, remain_cols.keys())){
+        cols.append!(col)
+    }
+
+    whereConditions = [expr(startDate, <=, sqlCol(tradetimeName, date), <=, endDate)]
+    whereConditions.append!(expr(09:30:00, !=, sqlCol(tradetimeName, time)))
+    whereConditions.append!(expr(13:00:00, !=, sqlCol(tradetimeName, time)))
+    whereConditions.append!(expr(sqlCol(securityidName), in, codes))
+    return sql(select=cols, from=data, where=whereConditions).eval()
+}
+
+
+// 由于因子存放在窄表中，利用计算好的因子作为特征需要按照窄表的方式读取并整理特征，用于后续因子的计算
+def getFeaturesFromNarrowTb(data, featureInfo, startDate, endDate, codes) {
+    tradetimeName = "tradetime"
+    securityidName = "securityid"
+    whereConditions = [expr(startDate, <=, sqlCol(tradetimeName, date), <=, endDate)]
+    whereConditions.append!(expr(09:30:00, !=, sqlCol(tradetimeName, time)))
+    whereConditions.append!(expr(13:00:00, !=, sqlCol(tradetimeName, time)))
+    whereConditions.append!(expr(sqlCol(securityidName), in, codes))
+
+    // tb_list = []
+    feature_tb = null
+    // fac_module = 'Momentum_Revert'
+    // feature = 'close_ret'
+    for (fac_module in featureInfo.keys()) {
+        features = featureInfo[fac_module]
+        for (feature in features) {
+            tmp_whereConditions = whereConditions.copy().append!(expr(sqlCol("factorname"), ==, fac_module+"::"+feature))
+            cur_factor = sql(
+                select=[sqlCol("securityid"), sqlCol("tradetime"), sqlCol("value", alias=feature)],
+                from=data,
+                where=tmp_whereConditions
+            ).eval()
+            // tb_list.append!(cur_factor)
+            if (typestr(feature_tb) ==VOID) {
+                feature_tb = cur_factor
+            } else {
+                cols = each(sqlCol, feature_tb.columnNames())
+                cols.append!(sqlCol(feature))
+
+                feature_tb = sql(select=sqlCol("*"), from=fj(feature_tb, cur_factor, securityidName.join(tradetimeName))).eval()
+                sqlUpdate(table=feature_tb, updates=[parseExpr("cur_factor_"+ securityidName +" as "+securityidName), parseExpr("cur_factor_"+ tradetimeName +" as "+tradetimeName)], where=parseExpr("securityid is null")).eval()
+
+                feature_tb = sql(select=cols, from=feature_tb).eval()
+            }
+        }
+    }
+
+    return feature_tb
+}
+
+def combineFeaturesForCodes(fromDbNameDict, fromTbNameDict, featureDict, startDate, endDate, securityidName, tradetimeName, codes) {
+    // 将多张表中的特征进行合并
+    // tb_list = []
+    feature_comb = null
+    for (tb_nickname in featureDict.keys()){
+        // print(tb_nickname)
+        // 获取库表
+        cur_dbName, cur_tbName = fromDbNameDict[tb_nickname], fromTbNameDict[tb_nickname]
+        cur_table = loadTable(cur_dbName, cur_tbName)
+        
+        // 读取特征
+        featureInfo = featureDict[tb_nickname]
+        if (typestr(featureInfo) == 'STRING VECTOR') {
+            feature_tb = getFeaturesFromWideTb(cur_table, featureInfo, startDate, endDate, securityidName, tradetimeName, codes)
+            // tb_list.append!(feature_tb)
+        } else {
+            feature_tb = getFeaturesFromNarrowTb(cur_table, featureInfo, startDate, endDate, codes)
+            // tb_list.append!(feature_tb)
+        }
+
+        // 合并特征列
+        if (typestr(feature_comb) == VOID) {
+            feature_comb = feature_tb
+        } else {
+            cols = each(sqlCol, feature_comb.columnNames())
+            cur_ft_cols_set = set(feature_tb.columnNames()) - set(`securityid`tradetime) - set(feature_comb.columnNames())
+            for (i in each(sqlCol, cur_ft_cols_set.keys())) {
+                cols.append!(i)
+            }
+            feature_comb = sql(select=sqlCol("*"), from=fj(feature_comb, feature_tb, `securityid`tradetime)).eval()
+            sqlUpdate(table=feature_comb, updates=[parseExpr("feature_tb_securityid as securityid"), parseExpr("feature_tb_tradetime as tradetime")], where=parseExpr("securityid is null")).eval()
+
+            feature_comb = sql(select=cols, from=feature_comb).eval()
+        }
+    }
+    return feature_comb
+}
+
+def calculate_new_factor(data, factorName, oriName, tarName, securityidName, tradetimeName) {
+    // 该计算模板以SQL的方式调用因子模块代码，并进行group by分组
+    oriname = oriName.strReplace(" ","")
+    tarname = tarName.strReplace(" ","")
+    // 找出因子函数所需参数
+    param = facplf_find_func_params(factorName)
+
+    // 依据原始列名，因子函数列名映射
+    // 依据逗号分隔
+    ori = oriname.split(",")
+    tar = tarname.split(",")
+    // 映射过程的index
+    indexF = tar in param 
+    indexS = param in tar
+    // 将原始列名映射到函数所需列名
+    param[indexS] = ori[indexF]
+    // 创建元编程代码
+    args = each(sqlCol, param)
+    // 将指定值转成int型
+    args[!isNull(int(ori[indexF]))] = int(ori[indexF][!isNull(int(ori[indexF]))])
+    // sql 元代码
+    // 选择所有代码并进行因子计算
+    selects = (sqlColAlias(sqlCol(tradetimeName),`tradetime), sqlColAlias(sqlCol(securityidName),`securityid),
+    sqlColAlias(makeUnifiedCall(funcByName("string"), factorName), "factorname"),
+    sqlColAlias(makeUnifiedCall(funcByName(factorName), args),"value"))
+    from_tb = sql(select=sqlCol("*"), from=data, orderBy=[sqlCol(securityidName), sqlCol(tradetimeName)], ascOrder=[1,1]).eval()
+    
+    result = sql(
+        select = selects,
+        from = from_tb,
+        groupBy=[sqlColAlias(makeUnifiedCall(date,sqlCol(tradetimeName))), sqlCol(securityidName)],
+        groupFlag = 0
+    ).eval()
+
+    return result
+}
+
+def saveTb(input){
+    data = input
+    facDbName = "dfs://secondLevelDB"
+    facTbName = "freq_6sec"  
+    data[`username] = `wangzr
+    data.reorderColumns!(`username`tradetime`securityid`factorname`value)
+    loadTable(facDbName, facTbName).append!(data)
+}
+
+def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate, endDate, factorName, oriName, tarName, securityidName, tradetimeName){
+    // 字符串转换为字典
+    fromDbNameDict = parseExpr(fromDbNameStr).eval()
+    fromTbNameDict = parseExpr(fromTbNameStr).eval()
+    featureDict = parseExpr(featureStr).eval()
+    
+    allcodes = sql(select=sqlColAlias(<distinct security_code>), 
+        from=loadTable("dfs://CROSS_SECTION_6sec", "trade_info"),
+        where=expr(sqlCol("trade_time", date),==,startDate)).eval()
+    codes_list = cut(allcodes, 1000)
+    // codes = codes[:10]
+    for (codes in codes_list) {
+        features = combineFeaturesForCodes(fromDbNameDict, fromTbNameDict, featureDict, 
+            startDate, endDate, securityidName, tradetimeName, codes)
+        result = calculate_new_factor(features, factorName, oriName, tarName, securityidName="securityid", tradetimeName="tradetime")
+        
+        unifiedCall(saveTb, [result])
+    }
+    return result
+}

@@ -258,7 +258,7 @@ def doAggTradeCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, windo
 
     // ===2.提取特征
     // 分组条件 
-    bar_str = "bar(exec_time, @period, 'right') as trade_time"
+    bar_str = "interval(exec_time, @period, 'null', closed='right') as trade_time"
     groupby = [sqlCol("security_code"), parseExpr(strReplace(bar_str, "@period", window_size))] 
     
     // 构造的特征列

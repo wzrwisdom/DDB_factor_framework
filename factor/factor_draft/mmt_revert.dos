@@ -1,0 +1,33 @@
+def close_ret(close){
+    f_close = ffill(close)
+    return f_close/move(f_close,1);
+}
+
+def intra_ret(open, close) {
+    // f_open, f_close = ffill(open), ffill(close)
+    return close / open
+}
+
+def holc_ratio(high, open, low, close) {
+    return iif((high-low)==0, 0, (close-open)/(high-low))
+}
+
+def bprice_re_change(td_buy_price, td_buy_price_std){
+    buy_price = ffill(td_buy_price, 1)
+    change = (buy_price-move(buy_price,1)) / td_buy_price_std
+    return iif(td_buy_price_std==0 or td_buy_price_std is null, 0, change)
+}
+
+def sprice_re_change(td_sell_price, td_sell_price_std){
+    sell_price = ffill(td_sell_price, 1)
+    change = (sell_price-move(sell_price,1)) / td_sell_price_std
+    return iif(td_sell_price_std==0 or td_sell_price_std is null, 0, change)
+}
+
+def mainforce_buy_money(large_buy_money, enormous_buy_money){
+    return nanInfFill(large_buy_money,0.)+nanInfFill(enormous_buy_money,0.)
+}
+
+def mainforce_sell_money(large_sell_money, enormous_sell_money){
+    return nanInfFill(large_sell_money,0.)+nanInfFill(enormous_sell_money,0.)
+}
