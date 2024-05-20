@@ -35,6 +35,8 @@ def secFreq_evaluate(
     startDate, endDate = temporalParse(startDate, "y.M.d"), temporalParse(endDate, "y.M.d")
     startTime, endTime = temporalParse(startTime, "H:m:s"), temporalParse(endTime, "H:m:s")
     
+    
+        
     // 读取所选因子的数据
     factorData = secFreq_eva_bt_lib::readFactorTable(fac_secu_name, fac_time_name, factor_col_name, fac_val_name, 
         startDate, endDate, startTime, endTime, fac_tb, factorNames)
@@ -42,18 +44,23 @@ def secFreq_evaluate(
     // print(string(startDate) + " " + string(startTime))
     // print(string(endDate) + " " + string(endDate))
     // print(select * from price_tb limit 5)
-    // 读取收益标签数据
-    labelTable = secFreq_eva_bt_lib::calcLabel(price_col_name, pric_secu_name, pric_time_name, 
-        price_tb, startDate, endDate, startTime, endTime, window=window, z_flag=zscore_flag)
-    
     // 可交易时间和股票
     startTS = timestamp(string(startDate) + " " + string(startTime)) // 回测起始时间
     endTS = timestamp(string(endDate) + " " + string(endTime)) // 回测截止时间
     tradables = secFreq_eva_bt_lib::genTradables(price_tb, pric_secu_name, pric_time_name, startTS, endTS)
-    
+    print("haha1")
     // 按列合并因子数据
     factorsTable = secFreq_eva_bt_lib::processAndMergeFactors(factorData, factorNames, winsorFactorNames, tradables, startDate, endDate, startTime, endTime, z_flag=zscore_flag)
     // select * from factorsTable limit 10
+    factorData = NULL
+    tradables = NULL
+    flushTSDBCache()
+    
+    // 读取收益标签数据
+    print("haha2")
+    labelTable = secFreq_eva_bt_lib::calcLabel(price_col_name, pric_secu_name, pric_time_name, 
+        price_tb, startDate, endDate, startTime, endTime, window=window, z_flag=zscore_flag)
+    
     
     // 计算所有因子的IC相关的指标信息
 
@@ -68,15 +75,22 @@ def secFreq_evaluate(
     result['cumIC'] = cumIC_result
     result['corr'] = corrTable 
     
+    
     // 获取股票的价格表
     priceTable = secFreq_eva_bt_lib::loadPriceData(price_tb, pric_secu_name, pric_time_name, price_col_name,
         startDate, endDate, startTime, endTime)
+        
+    price_tb = NULL
+    labelTable = NULL
+    flushTSDBCache()
     
-    factorName = factorNewNames[0]
+    // factorName = factorNewNames[0]
     
-    bt_result, pnl_summary = secFreq_eva_bt_lib::backtest_factors(factorNewNames, factorsTable, priceTable, startTS, endTS, window, group, long_short)
+    bt_result, cumRet_hedge, cumRet_summaryDict = secFreq_eva_bt_lib::backtest_factors(factorNewNames, factorsTable, priceTable, startTS, endTS, window, group, long_short)
+    
     result['backtest_result'] = bt_result
-    result['pnl_summary'] = pnl_summary
+    result['cumRet_hedge'] = cumRet_hedge
+    result['cumRet_summaryDict'] = cumRet_summaryDict
     
     res = secFreq_eva_bt_lib::extractTables(result)
     res['groups'] = dict(1..group, "group" + string(1..group))

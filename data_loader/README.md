@@ -19,7 +19,7 @@
 ```
 
 ## 特征提取
-利用导入到DDB的原始快照，逐笔成交以及逐笔委托数据，我们按照一定的滚动时间窗口进行特征提取。以000014标的为例，按照6s的频率提取特殊，其输出保存在./output/CROSS_SECTION_6SEC路径下。
+利用导入到DDB的原始快照，逐笔成交以及逐笔委托数据，我们按照一定的滚动时间窗口进行特征提取。以000014标的为例，按照6s的频率提取特征，其输出保存在./output/CROSS_SECTION_6SEC路径下。
 
 关于**createSnapCrossSec.dos**运行的配置如下：
 | 参数名称      | 类型  | 取值 | 描述 |
@@ -152,7 +152,7 @@
 | 卖单委托价标准差 | en_sell_price_std | 滚动窗口内卖单委托价的标准差 |
 | 委托价标准差 | en_price_std | 滚动窗口内所有委托价的标准差 |
 
-en_buy_num	en_sell_num	en_buy_vol	en_sell_vol	en_buy_price	en_sell_price	en_buy_price_std	en_sell_price_std	en_price_std
+
 
 **createCancelOrderCrossSec.dos**提取出的盘口数据特征如下：
 | 特征名      | 特征代码  | 描述 |

@@ -87,11 +87,10 @@ def evaluate_factors(factorNames, factorsTable, labelTable) {
     for (factorName in factorNames) {
         metricTable, ICTable = evaluate_factor(factorName, factorsTable, labelTable)
         metricsTable.append!(metricTable)
-        CumICTable = sql(select=(
-            sqlCol(`tradetime),
-            sqlColAlias(<cumsum(IC)>, `CumIC),
-            sqlColAlias(<cumsum(RankIC)>, `CumRankIC)
-            ), from=ICTable).eval()
+
+        CumICTable = select tradetime, cumsum(IC) as value, "CumIC" as ICType from ICTable 
+        CumICTable.append!(select tradetime, cumsum(RankIC) as value, "CumRankIC" as ICType from ICTable )
+ 
         cumIC_result['CumIC_Fac_'+factorName] = CumICTable
     }
 
@@ -153,10 +152,27 @@ def genTradables(inData, pric_secu_name, pric_time_name, startTS, endTS){
     ).eval()
 }
 
+def getLabelInCodes(codes, rawData, price_col_name, pric_time_name, pric_secu_name, startDate, endDate) {
+    sql_line = sql(select=sqlCol(price_col_name, ffill), 
+            from=rawData, where=[expr(sqlCol(pric_time_name, date), between, startDate, :, endDate), expr(sqlCol(pric_secu_name), in, codes)],
+            groupBy=[sqlCol(pric_time_name), sqlCol(pric_secu_name)], groupFlag=2, exec=false)
+    return sql_line.eval()
+}
+
 def calcLabel(price_col_name, pric_secu_name, pric_time_name,
     rawData, startDate, endDate, startTime, endTime, window, z_flag=true) {
+    
+    allcodes = sql(select=sqlCol(pric_secu_name, distinct), 
+        from=rawData,
+        where=expr(sqlCol(pric_time_name, date),==,startDate)).eval()
+    
+    codes_list = cut(allcodes, 1000)
+    
+    // closes = loop(getLabelInCodes{, rawData, price_col_name, pric_time_name, pric_secu_name, startDate, endDate}, codes_list).unionAll(false)
+    
+    
     close = sql(select=sqlCol(price_col_name, ffill), 
-        from=rawData, where=expr(sqlCol(pric_time_name, date), between, startDate, :, endDate),
+        from=rawData, where=[expr(sqlCol(pric_time_name, date), between, startDate, :, endDate), expr(sqlCol(pric_time_name, second), between, startTime, :, endTime)],
         groupBy=[sqlCol(pric_time_name), sqlCol(pric_secu_name)], groupFlag=2, exec=true).eval()
 
     ret = close / mfirst(close, window) - 1  // 计算收益率
@@ -172,7 +188,7 @@ def calcLabel(price_col_name, pric_secu_name, pric_time_name,
     retTable.rename!(`valueType, `securityid)
     retTable.rename!(pric_time_name, `tradetime)
     retTable.rename!(`value, `label)
-    retTable = select * from retTable where second(tradetime) between startTime:endTime
+    // retTable = select * from retTable where second(tradetime) between startTime:endTime // 提前了
 
     return retTable
 }
@@ -192,6 +208,11 @@ def loadFactorName(factorNamesDict){
     return factors
 }
 
+def getFactorTableByName(factor_name, cols, whereConditions, factor_table, factor_col_name){
+    new_whereConditions = whereConditions.copy()
+    new_whereConditions.append!( expr(sqlCol(factor_col_name), ==, factor_name) )
+    return sql(select=cols, from=factor_table, where=new_whereConditions).eval()
+}
 
 
 def readFactorTable(fac_secu_name, fac_time_name, factor_col_name, fac_val_name, 
@@ -203,8 +224,11 @@ def readFactorTable(fac_secu_name, fac_time_name, factor_col_name, fac_val_name,
     
     whereConditions = [expr(sqlCol(fac_time_name, date), between, startDate, :, endDate)]
     whereConditions.append!(expr(sqlCol(fac_time_name, second), between, startTime, :, endTime))
-    whereConditions.append!( expr(sqlCol(factor_col_name), in, factorNames) )
-    return sql(select=cols, from=factor_table, where=whereConditions).eval()
+    
+    // whereConditions.append!( expr(sqlCol(factor_col_name), in, factorNames) )
+    return loop(getFactorTableByName(,cols, whereConditions, factor_table, factor_col_name), factorNames).unionAll(false)
+    // print(sql(select=cols, from=factor_table, where=whereConditions))
+    // return sql(select=cols, from=factor_table, where=whereConditions).eval()
 }
 
 def formPortfolioSingleGroup(startTS, endTS, factorName, factorsTable, holdingMins, groups, groupId, reverse=false){
@@ -230,6 +254,9 @@ def formPortfolioSingleGroup(startTS, endTS, factorName, factorsTable, holdingMi
 
 
 def calcPortPnL(stockPnL, colName){
+    if (typestr(stockPnL) == "VOID") {
+        return NULL
+    }
 	return sql(select=(sqlColAlias(<sum(pnl)>, colName)), from=stockPnL, groupBy=sqlCol(`tradetime), orderBy=sqlCol(`tradetime)).eval()
 }
 
@@ -257,6 +284,9 @@ def formPortfolioHedge(startTS, endTS, factorName, factorsTable, holdingMins, gr
 }
 
 def evaluatePnL(portPnLTable, factorName, colName){
+    if (typestr(portPnLTable) == "VOID") {
+        return NULL
+    }
 	
 	PnLTable = sql(select=(sqlCol(`tradetime), sqlCol(colName, alias=`ret)), from=portPnLTable).eval()
 	CumPnLTable = select tradetime, cumprod(ret+1) as value from PnLTable
@@ -300,6 +330,13 @@ def calcStockPnL(portTable, priceTable, holdingMins, endTS){
 	// 时刻截面
 	timeStamps = sort distinct portTable.tranche
 	tsCount=timeStamps.size()
+    if (tsCount==0) {
+        print("is null")
+        return NULL
+    }
+    // print(timeStamps.size())
+    // a = 1..tsCount
+    // print('size:', a.size())
 	dictTSIndex = dict(timeStamps, 1..tsCount)
 	dictIndexTS = dict(1..tsCount, timeStamps)
     
@@ -337,35 +374,55 @@ def calPnL(factorName, port_name, factorsTable, priceTable, startTS, endTS, wind
 }
 
 
-def backtest_factors(factorNames, factorsTable, priceTable, startTS, endTS, window, group, long_short) {
+def backtest_factors(factorNames, mutable factorsTable, priceTable, startTS, endTS, window, group, long_short) {
 
     metricsTable = table(100:0, 
         `factor_code`port_name`total_ret`mean_ret`std_ret`sharpe_ratio`win_rate`max_draw_down, 
         [STRING,STRING,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE])
-    portPnLSummary = 0
+    portCumRetSummary_hedge = 0
+
+    portCumRetSummaryDict = dict(STRING, ANY)
     for (factorName in factorNames) {
+
         // factorName = factorNewNames[0]
+        print("factor:", factorName)
+        portCumRetSummary_oneFac = 0
+
         if (long_short) {
             // 多空对冲组收益
             portPnL, metricTable = calPnL(factorName, "hedge", factorsTable, priceTable, startTS, endTS, window, group, hedge_flag=true)
-            portPnL.rename!(`hedge, factorName)
-            if(type(portPnLSummary)==4){
-                portPnLSummary = portPnL
+            if (typestr(portPnL) == "VOID") {
+                return NULL, NULL, NULL
+            }
+            portCumRetSummary_oneFac = select tradetime, "hedge" as groupType, cumsum(hedge) as value from portPnL
+            // portPnL.rename!(`hedge, factorName)
+            portCumRet_hedge = select tradetime, factorName as factorType, cumsum(hedge) as value from portPnL
+            
+            if(type(portCumRetSummary_hedge)==4){
+                portCumRetSummary_hedge = portCumRet_hedge
             }
             else{
-                portPnLSummary = select * from lj(portPnLSummary, portPnL, `tradetime)
+                // portCumRetSummary_hedge = select * from lj(portCumRetSummary_hedge, portCumRet_hedge, `tradetime)
+                portCumRetSummary_hedge.append!(portCumRet_hedge)
             }
             metricsTable.append!(metricTable)
         }
+        
     
         // 每组收益
         for (i in 1..group) {
             colName = "group" + string(i)
             portPnL, metricTable = calPnL(factorName, colName, factorsTable, priceTable, startTS, endTS, window, group, hedge_flag=false)
+
+            // a = select tradetime, colName as groupType, hedge as value from portPnL
+            // select *, cumsum(value) from a limit 10
+            cols = [sqlCol("tradetime"), parseExpr("'"+ colName + "' as groupType "), sqlCol(colName, cumsum, alias="value")]
+            portCumRetSummary_oneFac.append!(  sql(select=cols, from=portPnL).eval() )
             metricsTable.append!(metricTable)
         }
+        portCumRetSummaryDict["CumRet_Fac_" + factorName] = portCumRetSummary_oneFac
     }
-    return metricsTable, portPnLSummary
+    return metricsTable, portCumRetSummary_hedge, portCumRetSummaryDict
 }
 
 def loadPriceData(price_tb, pric_secu_name, pric_time_name, price_col_name, 

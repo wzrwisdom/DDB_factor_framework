@@ -19,6 +19,7 @@ def getFeaturesFromWideTb(data, featureInfo, startDate, endDate, securityidName,
     whereConditions.append!(expr(09:30:00, !=, sqlCol(tradetimeName, time)))
     whereConditions.append!(expr(13:00:00, !=, sqlCol(tradetimeName, time)))
     whereConditions.append!(expr(sqlCol(securityidName), in, codes))
+    // print(sql(select=cols, from=data, where=whereConditions))
     return sql(select=cols, from=data, where=whereConditions).eval()
 }
 
@@ -97,6 +98,8 @@ def combineFeaturesForCodes(fromDbNameDict, fromTbNameDict, featureDict, startDa
 
             feature_comb = sql(select=cols, from=feature_comb).eval()
         }
+        
+        feature_tb=NULL
     }
     return feature_comb
 }
@@ -138,16 +141,17 @@ def calculate_new_factor(data, factorName, oriName, tarName, securityidName, tra
     return result
 }
 
-def saveTb(input){
+def saveTb(input, facDbName, facTbName){
     data = input
-    facDbName = "dfs://secondLevelDB"
-    facTbName = "freq_6sec"  
+    // facDbName = "dfs://secondLevelDB"
+    // facTbName = "freq_6sec" 
+    // print(facDbName, facTbName) 
     data[`username] = `wangzr
     data.reorderColumns!(`username`tradetime`securityid`factorname`value)
     loadTable(facDbName, facTbName).append!(data)
 }
 
-def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate, endDate, factorName, oriName, tarName, securityidName, tradetimeName){
+def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate, endDate, factorName, oriName, tarName, securityidName, tradetimeName, toDbName="dfs://secondLevelDB", toTbName="freq_6sec"){
     // 字符串转换为字典
     fromDbNameDict = parseExpr(fromDbNameStr).eval()
     fromTbNameDict = parseExpr(fromTbNameStr).eval()
@@ -156,14 +160,17 @@ def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate,
     allcodes = sql(select=sqlColAlias(<distinct security_code>), 
         from=loadTable("dfs://CROSS_SECTION_6sec", "trade_info"),
         where=expr(sqlCol("trade_time", date),==,startDate)).eval()
-    codes_list = cut(allcodes, 1000)
+    codes_list = cut(allcodes, 200)
     // codes = codes[:10]
     for (codes in codes_list) {
         features = combineFeaturesForCodes(fromDbNameDict, fromTbNameDict, featureDict, 
             startDate, endDate, securityidName, tradetimeName, codes)
         result = calculate_new_factor(features, factorName, oriName, tarName, securityidName="securityid", tradetimeName="tradetime")
-        
-        unifiedCall(saveTb, [result])
+        unifiedCall(saveTb, (result, toDbName, toTbName))
+        // 手动清除TSDB占用的缓冲，否则系统10min调用一次
+        features = NULL
+        result = NULL
+        flushTSDBCache()
     }
     return result
 }

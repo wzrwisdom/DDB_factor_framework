@@ -273,7 +273,11 @@ def doAggTradeCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, windo
         sqlColAlias(<extractPriceStd(exec_price, side, 0)>, 'td_price_std')
     ]
     features_pv = sql(select=cols, from=trade_tb, where=whereConditions, groupBy=groupby, groupFlag=1).eval()
-    
+    // 将特征对应的时间对其 (因为使用了interval函数而不是bar函数)
+    num = int(window_size.regexReplace("[a-zA-Z]", ""))
+    unit = window_size.regexReplace("[0-9]", "")
+    update_col = sqlCol("trade_time", temporalAdd{, num, unit}, alias="trade_time")
+    sqlUpdate(features_pv, update_col).eval()
     
     // ===3.根据资金规模获取的信息特征
     // 整理委托数据（不包含撤单）
@@ -377,7 +381,7 @@ def doAggTradeCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, windo
     features_source = sql(select=sel_cols, from=trade_tb, groupBy=groupby, groupFlag=1).eval()
     
     features = exec * from lj(features_pv, features_source, `security_code`trade_time)
-    writeLogAndPrint(select * from features limit 2)
+    // writeLogAndPrint(select * from features limit 2)
     writeLogAndPrint("==========================")
     renderTransformedDataFunc(toDbName, toTbName, features)
     
@@ -423,7 +427,7 @@ def doAggEntrustCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, win
         sqlColAlias(<extractPriceStd(order_price, side, 0)>, "en_price_std")
     ]
     features = sql(select=cols, from=entrust_tb, where=whereConditions, groupBy=groupby, groupFlag=1).eval()
-    writeLogAndPrint(select * from features limit 2)
+    // writeLogAndPrint(select * from features limit 2)
     writeLogAndPrint("==========================")
     renderTransformedDataFunc(toDbName, toTbName, features)    
 }
@@ -525,7 +529,7 @@ def doAggCancelCrossSectionForCodes(toDbName, toTbName, dateStart, dateEnd, wind
     sqlUpdate(table=cancelOrd_sz_tb, updates=updates_cols, from=<lj(cancelOrd_sz_tb, entrust_tb, `security_code`exec_date`match_seq_num, `security_code`exec_date`appl_seq_num)>).eval()
     if ((exec count(*) from cancelOrd_sz_tb) > 0){
         features_sz = extractCancelOrderFeature(cancelOrd_sz_tb, window_size)
-        writeLogAndPrint(select * from features_sz limit 2)
+        // writeLogAndPrint(select * from features_sz limit 2)
         writeLogAndPrint("==========================")
         renderTransformedDataFunc(toDbName, toTbName, features_sz) 
     }

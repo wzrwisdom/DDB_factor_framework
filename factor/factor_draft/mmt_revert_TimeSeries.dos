@@ -14,6 +14,26 @@ def close_ret_ema(close_ret) {
     return ema(close_ret, 10, warmup=false)
 }
 
-def close_ret_10m_kurt(trade_time, close_ret) {
-    return tmkurtosis(trade_time, close_ret, 10m)
+def close_ret_10m_kurt(close_ret) {
+    // print(typestr(close_ret))
+    // print(close_ret)
+    result = mkurtosis(close_ret, 2*60)
+    // print(result)
+    return result
+}
+
+
+def QRS(trade_time, td_buy_price, td_sell_price) {
+    cur_window = 5*60
+    zscore_window = 15*60
+    support_p_std = mstd(td_buy_price, window=cur_window)
+    resistance_p_std = mstd(td_sell_price, window=cur_window)
+    rs_p_corr = mcorr(td_buy_price, td_sell_price, window=cur_window)
+
+    rs_div = resistance_p_std / support_p_std
+    rs_div = iif(resistance_p_std != 0 and support_p_std == 0, mmax(rs_div, window=cur_window), rs_div)
+    rs_div = iif(resistance_p_std is null and support_p_std is not null, mmax(rs_div, window=cur_window), rs_div)
+    rs_div = iif(support_p_std is null and resistance_p_std is not null, mmin(rs_div, window=cur_window), rs_div)
+    
+    return moving(my_zscore, (rs_div*rs_p_corr), zscore_window)
 }
