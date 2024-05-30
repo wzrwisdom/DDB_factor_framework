@@ -1,0 +1,60 @@
+/**
+* level2 Snapshot data loader (Merge SZ and SH data)
+*
+* @param rootPath: STRING, 文件路径.
+* @param dbName: STRING, 库名.
+* @param tbName: STRING, 表名.
+* @param market: STRING, 市场，请输入all, sh, sz。 all - 全部, sh - 上交所， sz - 深交所。
+* @param startDate: DATE, 导入数据开始时间.
+* @param endDate: DATE, 导入数据结束时间.
+* @param threadNum: INT, 并发数.
+* @param initDb: BOOL, 选填，是否初始化库.
+* @param initTb: BOOL, 选填，是否初始化表.
+
+*/
+def snapshotMain(rootPath, dbName, tbName, market, startDate, endDate, threadNum, initDb=false, initTb=false){
+    //任务ID记录
+    jobIdlist = []
+
+    if (market == "all") {
+        // 创建库表
+        TLDataModule::createDBAndTable(dbName, tbName, initDb, initTb, TLDataModule::createDatabaseSnapshotAll, TLDataModule::createTableSnapshotAll)
+
+        // 获取所有导入数据文件
+        filePathList = TLDataModule::renderFilePathListSnapshotAll(rootPath, startDate, endDate)
+
+        // 以threadNum切分任务
+        filePathListCutted = TLDataModule::cutFilePathList(filePathList, threadNum)
+
+        // 提交批任务
+        for (filePathList in filePathListCutted){
+            jobId = TLDataModule::submitDataLoadJob(dbName, tbName, filePathList, TLDataModule::renderDateList(filePathList), TLDataModule::renderSchemaCsvSnapshotAll, TLDataModule::renderDateList, TLDataModule::renderTransformedDataSnapshotAll)
+            jobIdlist.append!(jobId)
+        }
+
+    } else if (market == "sh") {
+        TLDataModule::createDBAndTable(dbName, tbName, initDb, initTb, TLDataModule::createDatabaseSnapshotSH, TLDataModule::createTableSnapshotSH)
+        filePathList = TLDataModule::renderFilePathListSnapshotSH(rootPath, startDate, endDate)
+        filePathListCutted = TLDataModule::cutFilePathList(filePathList, threadNum)
+        for (filePathList in filePathListCutted){
+            jobId = TLDataModule::submitDataLoadJob(dbName, tbName, filePathList, TLDataModule::renderDateList(filePathList), TLDataModule::renderSchemaCsvSnapshotSH, TLDataModule::renderDateList, TLDataModule::renderTransformedDataSnapshotSH)
+            jobIdlist.append!(jobId)
+        }
+    } else if (market == "sz") {
+        TLDataModule::createDBAndTable(dbName, tbName, initDb, initTb, TLDataModule::createDatabaseSnapshotSZ, TLDataModule::createTableSnapshotSZ)
+        filePathList = TLDataModule::renderFilePathListSnapshotSZ(rootPath, startDate, endDate)
+        filePathListCutted = TLDataModule::cutFilePathList(filePathList, threadNum)
+        for (filePathList in filePathListCutted){
+            jobId = TLDataModule::submitDataLoadJob(dbName, tbName, filePathList, TLDataModule::renderDateList(filePathList), TLDataModule::renderSchemaCsvSnapshotSZ, TLDataModule::renderDateList, TLDataModule::renderTransformedDataSnapshotSZ)
+            jobIdlist.append!(jobId)
+        }
+    } else{
+        throw "market参数输入错误"
+    }
+
+    //日志记录
+    TLDataModule::writeLogAndPrint("Server_S0200_FACPLF: All jobs submitted successfully.")
+
+    //返回任务ID为平台提供解析
+    return jobIdlist
+}

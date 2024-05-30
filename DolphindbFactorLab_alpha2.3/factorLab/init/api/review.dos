@@ -1,0 +1,896 @@
+///////////////
+//我提交的审批//
+///////////////
+
+//获取我提交的因子审批列表
+def facplf_get_my_factor_submission_list(){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    res = dict(STRING, ANY)
+    
+    //按发布时间倒序提取审批记录
+    rvid = exec reviewId from review_info where submitter = user context by reviewId limit -1 
+    post = select reviewId from review_info where reviewId in rvid and status = 0 context by reviewId order by uploadTime desc limit -1 
+    submit = select l.* from review_info l right join post r on l.reviewId = r.reviewId context by reviewId limit -1 
+    submit = select * from submit order by uploadTime desc
+    //无数据则返回NULL
+    if (submit.count() == 0){
+        res["items"] = [];
+        res["total"] = 0;
+        return res}
+    
+    item_list = []
+    for (rv in submit){
+        //获取发布时的信息
+        subinfo = select * from review_info where reviewId = rv.reviewId and status = 0
+        submit_time = subinfo.uploadTime[0]
+        rvers = exec reviewer from subinfo
+        note = subinfo.note //发布备注
+        //审批结果
+        if (rv.status in [-1,1]){suggestion = rv.note} else{suggestion = string(NULL)}
+        
+        item = dict(STRING, ANY)
+        item["review_id"] = rv.reviewId
+        item["submitter"] = rv.submitter
+        item["submit_time"] = submit_time
+        item["scope"] = rv.reviewDept
+        item["reviewers"] = rvers
+        item["status"] = rv.status
+        item["note"] = note
+        item["suggestion"] = suggestion
+        
+        //facCode
+        if (rv.isEncrypted == true){facCode = string(NULL)} else{facCode = rv.factorCode[0]}
+            //二次发布
+        pub = select * from public_info where fid = rv.fid and deptName = rv.reviewDept context by fid limit -1
+        pub = select * from pub where isDeleted = false
+        if (pub.count() != 0){isRepublish = true}else{isRepublish = false}
+        
+        factor = dict(STRING, ANY)
+        factor["id"] = rv.fid
+        factor["properties"] = rv.properties
+        factor["funcs"] = (rv.funcs).split(",")
+        factor["name"] = rv.factorName
+        factor["creator"] = rv.username
+        factor["comment"] = rv.comment
+        factor["code"] = facCode
+        factor["is_republish"] = isRepublish
+        
+        item["factor"] = factor
+        
+        item_list.append!(item)
+    }
+    
+    
+    res["items"] = item_list
+    res["total"] = item_list.count()
+    
+    return res
+}
+
+
+//撤回我提交的因子审批申请
+def facplf_withdraw_my_factor_submission(param){
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    user = getCurrentSessionAndUser()[1]
+
+    factor = exec status from review_info where reviewId = uuid(param.review_id) context by reviewId limit -1
+    rvLast = factor[0]
+    if(!(rvLast in [0, 3])){throw toStdJson({code: 'S024'})}
+
+    //获取数据
+    withdraw = select * from review_info where reviewId = uuid(param.review_id) context by reviewer limit -1
+    withdraw = select * from withdraw where status = 0
+
+    //该条审批是否是二次发布
+    pub = select * from public_info where fid = withdraw.fid[0] context by deptName limit -1
+    pub = select * from pub where isDeleted = false
+    pubDept = exec deptName from pub //目前已公开的系统或部门
+    if (pubDept.count() != 0){isRepublish = true}else{isRepublish = false}
+
+    //不是二次发布
+    if ((isRepublish == false) or (!(withdraw.reviewDept[0] in pubDept))){
+        update withdraw set status = 2, uploadTime = now(), factorCode = string(NULL)
+        review_info.append!(withdraw)
+
+        receivers = exec reviewer from withdraw
+        for (er in receivers){
+            facplf_send_msg(user, er, 4, uuid(param.review_id), "factor")}
+    }else{
+        //其他部门审核情况
+        repub = select * from review_info where fid = pub.fid[0] context by reviewDept limit -1
+        repub = select * from repub where status in [0, 3]
+
+        //一起撤回所有部门的审核
+        update repub set status = 2, note = string(NULL), uploadTime = now(), factorCode = string(NULL)
+        review_info.append!(repub)
+
+        //发送消息
+        receivers = exec reviewer from repub
+        for(er in receivers){
+                facplf_send_msg(user, er, 4, uuid(param.review_id), "factor")}
+
+    }
+}
+
+
+//获取审批详情
+def facplf_get_factor_submission_detail(param){
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    analysis_info = loadTable("dfs://analysis_run_info", "run_info")
+    id = uuid(param.review_id)
+    rv = select * from review_info where reviewId = id context by reviewId limit -1
+    if (rv.count()==0){return NULL}
+
+    //获取发布时的信息
+    subinfo = select * from review_info where reviewId = id and status=0
+    rvers = exec reviewer from subinfo
+    submit_time = subinfo.uploadTime[0]
+    note = subinfo.note[0]
+
+    //审批结果
+    if (rv.status[0] in [-1,1]){
+        suggestion = rv.note[0]; reviewer = rv.reviewer[0]} else{suggestion = string(NULL); reviewer =string(NULL)}
+
+    res = dict(STRING, ANY)
+    res["review_id"] = rv.reviewId[0]
+    res["submitter"] = rv.submitter[0]
+    res["submit_time"] = submit_time
+    res["scope"] = rv.reviewDept[0]
+    res["reviewers"] = rvers
+    res["status"] = rv.status[0]
+    res["note"] = note
+    res["encrypt"] = rv.isEncrypted[0]
+    res["suggestion"] = suggestion
+
+    //facCode
+    if (rv.isEncrypted[0] == true){facCode = string(NULL)} else{facCode = rv.factorCode[0]}
+
+    //二次发布
+    pub = select * from public_info where fid = rv.fid[0] and deptName = rv.reviewDept[0] context by fid limit -1
+    pub = select * from pub where isDeleted = false
+    if (pub.count() != 0){isRepublish = true}else{isRepublish = false}
+
+    factor = dict(STRING, ANY)
+    factor["id"] = rv.fid[0]
+    factor["properties"] = rv.properties[0]
+    factor["funcs"] = (rv.funcs[0]).split(",")
+    factor["name"] = rv.factorName[0]
+    factor["creator"] = rv.username[0]
+    factor["comment"] = rv.comment[0]
+    factor["code"] = facCode
+    factor["is_republish"] = isRepublish
+    factor["reviewer"] = reviewer
+
+    reports = array(ANY)
+    analysis_id = rv.analysisId[0]
+    if(count(analysis_id)!=0){
+        alys = split(analysis_id, ",")
+        for (ai in alys){//ai = alys[0]
+            analysis_tb = select * from analysis_info where aid = uuid(ai) and isDeleted = false
+            report = dict(STRING, ANY)
+            report["analysis_id"] = ai
+            report["func_name"] = (analysis_tb.funcName).split("::")[1]
+            report["create_time"] = analysis_tb.createTime[0]
+            reports.append!(report)
+        }
+    }
+    res["factor"] = factor
+    res["reports"] = reports
+
+    return res
+}
+
+
+//获取我提交的因子模板审批列表
+def facplf_get_my_temp_submission_list(){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+    res = dict(STRING, ANY)
+    
+    //按发布时间倒序提取审批记录
+    rvid = exec reviewId from review_info where submitter = user context by reviewId limit -1
+    post = select reviewId from review_info where reviewId in rvid and status = 0 context by reviewId limit -1
+    submit = select l.* from review_info l inner join post r on l.reviewId = r.reviewId context by reviewId order by uploadTime desc limit -1
+
+    //无数据则返回NULL
+    if (submit.count() == 0){res["items"] = [];res["total"] = 0;return res}
+    
+    item_list = []
+    for (rv in submit){
+        //获取发布时的信息
+        subinfo = select * from review_info where reviewId = rv.reviewId and status = 0
+        submit_time = subinfo.uploadTime[0]
+        rvers = exec reviewer from subinfo
+        note = subinfo.note //发布备注
+        //审批结果
+        if (rv.status in [-1,1]){suggestion = rv.note} else{suggestion = string(NULL)}
+        
+        item = dict(STRING, ANY)
+        item["review_id"] = rv.reviewId
+        item["submitter"] = rv.submitter
+        item["submit_time"] = submit_time
+        item["scope"] = rv.reviewDept
+        item["reviewers"] = rvers
+        item["status"] = rv.status
+        item["note"] = note
+        item["suggestion"] = suggestion
+        
+
+        //二次发布
+        pub = select * from public_info where tempId = rv.tempId and deptName = rv.reviewDept context by tempId limit -1
+        pub = select * from pub where isDeleted = false
+        if (pub.count() != 0){isRepublish = true}else{isRepublish = false}
+        
+        template = dict(STRING, ANY)
+        template["id"] = rv.tempId
+        template["name"] = rv.tempName
+        template["type"] = rv.tempCat
+        template["properties"] = rv.factorCat
+        template["creator"] = rv.username
+        template["comment"] = rv.comment
+        template["code"] = rv.tempCode
+        template["is_republish"] = isRepublish
+        
+        item["template"] = template
+        
+        item_list.append!(item)
+    }
+    
+    
+    res["items"] = item_list
+    res["total"] = item_list.count()
+    
+    return res
+}
+
+
+//撤回我提交的模板审批申请
+def facplf_withdraw_my_temp_submission(param){
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+    user = getCurrentSessionAndUser()[1]
+
+    temp = exec status from review_info where reviewId = uuid(param.review_id) context by reviewId limit -1
+    rvLast = temp[0]
+    if(!(rvLast in [0, 3])){throw toStdJson({code: 'S024'})}
+
+    //获取数据
+    withdraw = select * from review_info where reviewId = uuid(param.review_id) context by reviewer limit -1
+    withdraw = select * from withdraw where status = 0
+
+    //该条审批是否是二次发布
+    pub = select * from public_info where tempId = withdraw.tempId[0] context by deptName limit -1
+    pub = select * from pub where isDeleted = false
+    pubDept = exec deptName from pub //目前已公开的系统或部门
+    if (pubDept.count() != 0){isRepublish = true}else{isRepublish = false}
+
+    //不是二次发布
+    if ((isRepublish == false) or (!(withdraw.reviewDept[0] in pubDept))){
+        update withdraw set status = 2, uploadTime = now(), tempCode = string(NULL)
+        review_info.append!(withdraw)
+
+        receivers = exec reviewer from withdraw
+        for (er in receivers){
+            facplf_send_msg(user, er, 4, uuid(param.review_id), "template")}
+    }else{
+        //其他部门审核情况
+        repub = select * from review_info where tempId = pub.tempId[0] context by reviewDept limit -1
+        repub = select * from repub where status in [0, 3]
+
+        //撤回所有必填部门的审核
+        update repub set status = 2, note = string(NULL), uploadTime = now(), tempCode = string(NULL)
+        review_info.append!(repub)
+
+        //发送消息
+        receivers = exec reviewer from repub
+        for(er in receivers){
+            facplf_send_msg(user, er, 4, uuid(param.review_id), "template")}
+
+    }
+}
+
+
+//获取因子模板审批详情
+def facplf_get_temp_submission_detail(param){
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+
+    rv = select * from review_info where reviewId = uuid(param.review_id) context by reviewId limit -1
+
+    //获取发布时的信息
+    subinfo = select * from review_info where reviewId = uuid(param.review_id) and status=0
+    rvers = exec reviewer from subinfo
+    submit_time = subinfo.uploadTime[0]
+    note = subinfo.note[0]
+    //审批结果
+    if (rv.status[0] in [-1,1]){suggestion = rv.note[0]; reviewer = rv.reviewer[0]} else{suggestion = string(NULL); reviewer =string(NULL)}
+
+    res = dict(STRING, ANY)
+    res["review_id"] = rv.reviewId[0]
+    res["submitter"] = rv.submitter[0]
+    res["submit_time"] = submit_time
+    res["scope"] = rv.reviewDept[0]
+    res["reviewers"] = rvers
+    res["status"] = rv.status[0]
+    res["note"] = note
+    res["suggestion"] = suggestion
+
+    //二次发布
+    pub = select * from public_info where tempId = rv.tempId[0] and deptName = rv.reviewDept[0] context by tempId limit -1
+    pub = select * from pub where isDeleted = false
+    if (pub.count() != 0){isRepublish = true}else{isRepublish = false}
+
+    template = dict(STRING, ANY)
+    template["id"] = rv.tempId[0]
+    template["name"] = rv.tempName[0]
+    template["type"] = rv.tempCat[0]
+    template["properties"] = rv.factorCat[0]
+    template["creator"] = rv.username[0]
+    template["comment"] = rv.comment[0]
+    template["code"] = rv.tempCode[0]
+    template["is_republish"] = isRepublish
+    template["reviewer"] = reviewer
+
+    res["template"] = template
+
+    return res
+}
+
+
+/////////////////
+//提交给我的审批//
+/////////////////
+
+//获取我审批的因子列表
+def facplf_get_my_factor_review_list(param){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    res = dict(STRING, ANY)
+    
+    if (param.scope == NULL){
+        rvId = exec reviewId from review_info where reviewer = user context by reviewId limit -1
+    }else{
+        //获得当前部门下审批人的所有审批记录
+        rvId = exec reviewId from review_info where reviewer = user and reviewDept = param.scope context by reviewId limit -1
+    }
+
+    //如果没有数据，则返回NULL
+    if (count(rvId) == 0){res["items"] = [];res["total"] = 0;return res}
+    
+    rvlist = exec reviewId from review_info where reviewId in rvId and status = 0 context by reviewId order by uploadTime desc limit 1
+
+    item_list = []
+    for(i in rvlist){//i = rvlist[0]
+        //获取该条审批下最新的信息
+        id = uuid(i["reviewId"])
+        rv = select * from review_info where reviewId = id context by reviewId limit -1
+        //获取该条审批发布时的信息
+        subinfo = select * from review_info where reviewId = id and status = 0
+        submit_time = subinfo.uploadTime[0]
+        rvers = exec reviewer from subinfo
+        note = subinfo.note[0] //发布备注
+        //审批结果
+        if (rv.status in [-1,1]){suggestion = rv.note[0]} else{suggestion = string(NULL)}
+        
+        item = dict(STRING, ANY)
+        item["review_id"] = rv.reviewId[0]
+        item["submitter"] = rv.submitter[0]
+        item["submit_time"] = submit_time
+        item["scope"] = rv.reviewDept[0]
+        item["reviewers"] = rvers
+        item["status"] = rv.status[0]
+        item["note"] = note
+        item["suggestion"] = suggestion
+        
+        //facCode
+        if (rv.isEncrypted == true){facCode = string(NULL)} else{facCode = rv.factorCode[0]}
+        //二次发布
+        pub = select * from public_info where fid = rv.fid[0] and deptName = rv.reviewDept[0] context by fid limit -1
+        pub = select * from pub where isDeleted = false
+        if (pub.count() != 0){isRepublish = true}else{isRepublish = false}
+        
+        factor = dict(STRING, ANY)
+        factor["id"] = rv.fid[0]
+        factor["properties"] = rv.properties[0]
+        factor["funcs"] = (rv.funcs[0]).split(",")
+        factor["name"] = rv.factorName[0]
+        factor["creator"] = rv.username[0]
+        factor["comment"] = rv.comment[0]
+        factor["code"] = facCode
+        factor["is_republish"] = isRepublish
+        
+        item["factor"] = factor
+        
+        item_list.append!(item)
+    }
+    
+    
+    res["items"] = item_list
+    res["total"] = item_list.count()
+    
+    return res    
+}
+
+
+//通过单个因子审批申请
+def facplf_approve_factor(param){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+
+    //检查该条审批下的最新状态
+    factor = exec status from review_info where reviewId = uuid(param.review_id) context by reviewId limit -1
+    rvLast = factor[0] //审批状态
+    if(rvLast != 0){throw toStdJson({code: 'S026'})}
+
+    //获取数据
+    approve = select * from review_info where reviewId = uuid(param.review_id) context by reviewer limit -1
+    approve = select * from approve where status = 0
+
+    //判断该module是否存在于public_info
+    md = select * from public_info where factorName = approve.factorName[0] context by fid, deptName limit -1
+    md = select * from md where isDeleted = false
+    if (md.count() != 0){
+        if(md.username[0] != approve.username[0]){
+            throw toStdJson({code: 'S046', message: '操作失败, 该因子名称已存在' })
+        }
+    }
+
+    //消息：保存审批人
+    receivers = exec reviewer from approve
+    receivers = receivers[!(user == receivers)]
+
+    //该条审批是否是二次发布（排除公开的情况）
+    pub = select * from public_info where fid = approve.fid[0] context by deptName limit -1
+    pub = select * from pub where isDeleted = false
+    pubDept = exec deptName from pub //目前已公开的系统或部门
+    if (pubDept.count() != 0){isRepublish = true}else{isRepublish = false}
+    
+    //排除公开的情况
+    if((approve.reviewDept[0]=="facplf$public")and(!("facplf$public" in pubDept))){
+        isRepublish = false
+    }
+
+    //不是二次发布(草稿发布和申请公开)
+    if (isRepublish == false){
+        //审批通过，若有多个审批人，则只记录当前审批人的一条
+        update approve set status = 1, reviewer = user, uploadTime = now(), note = param.suggestion
+        approval = select * from approve limit 1
+        review_info.append!(approval)
+
+        //发送消息
+        receivers.append!(approval.submitter)
+        for(er in receivers){
+        facplf_send_msg(user, er, 2, approval.reviewId, "factor")}
+
+        //存入公开因子表
+        public_info.tableInsert(
+            table(
+                approval.fid as `fid,
+                approval.factorName as `factorName,
+                approval.username as `username,
+                approval.comment as `comment,
+                approval.reviewDept as `deptName,
+                approval.reviewer as `reviewer,
+                approval.uploadTime as `reviewTime,
+                approval.properties as `properties,
+                approval.tags as `tags,
+                approval.funcs as `funcs,
+                false as isDeleted,
+                string(NULL) as remover
+            )
+        )
+    }else{
+        //是二次发布
+        //需要确定二次发布时所有部门系统的审批通过情况
+        repub = select * from review_info where fid = pub.fid[0] context by reviewDept limit -1
+        repub = select * from repub where status in [0, 3]
+
+        others = exec status from repub where reviewId != uuid(param.review_id) and reviewDept in pubDept
+
+        if (0 in others){
+            //若其他必填部门还未全部审核结束，则记录当前状态为3。
+            update approve set status = 3, reviewer = user, uploadTime = now(), note = param.suggestion
+            approval = select * from approve limit 1
+            review_info.append!(approval)
+
+            //消息发送
+            for(er in receivers){
+            facplf_send_msg(user, er, 5, approval.reviewId, "factor")}
+
+            return {"is_published": false}
+
+        }else{
+            //若其他必填部门审核已结束，则公开该因子。
+            update repub set status = 1 where status = 3
+            update repub set status = 1, reviewer = user, uploadTime = now(), note = param.suggestion where reviewId = uuid(param.review_id) //将最后一个部门的审核人、发布时间等更新
+            repub = select * from repub where status = 1
+            review_info.append!(repub)
+
+            //发送消息
+            othermsg = exec reviewer from repub where reviewId != uuid(param.review_id)
+            receivers.append!(othermsg)
+            receivers.append!(repub.submitter[0])
+            for(er in receivers){
+                facplf_send_msg(user, er, 2, uuid(param.review_id), "factor")}
+
+            //存入公开因子表
+            for(approval in repub){
+                public_info.tableInsert(
+                    table(
+                    approval.fid as `fid,
+                    approval.factorName as `factorName,
+                    approval.username as `username,
+                    approval.comment as `comment,
+                    approval.reviewDept as `deptName,
+                    approval.reviewer as `reviewer,
+                    approval.uploadTime as `reviewTime,
+                    approval.properties as `properties,
+                    approval.tags as `tags,
+                    approval.funcs as `funcs,
+                    false as isDeleted,
+                    string(NULL) as remover)
+                )
+            }
+        }
+    }
+
+    namecheck = select * from review_info where factorName = approve.factorName[0] and username != approve.username[0] context by reviewId limit -1
+    namecheck = select * from namecheck where status in [0, 3]
+
+    update namecheck set status = -1, reviewer = "system", uploadTime = now(), note = "该因子名已被使用，请作者改名"
+    review_info.append!(namecheck)
+
+    for(nc in namecheck){
+        facplf_send_msg("system", nc.submitter, 3, nc.reviewId, "factor")
+    }
+
+    return {"is_published": true}
+}
+
+
+//批量通过因子审批申请
+def facplf_approve_multi_factors(param){
+    notpublish = 0
+    for (i in param.reviews){
+        rv = dict(STRING, ANY)
+        rv["review_id"] = i
+        rv["suggestion"] = param.suggestion
+
+        res = facplf_approve_factor(rv)
+        if (res.is_published == false){
+            notpublish += 1
+        }
+    }
+    if(notpublish == 0){
+        return {"is_all_published": true}
+    }else{
+        return {"is_all_published": false}
+    }
+}
+
+
+//拒绝因子审批申请
+def facplf_reject_factor(param){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+
+    //检查该条审批下的最新状态
+    factor = exec status from review_info where reviewId = uuid(param.review_id) context by reviewId limit -1
+    rvLast = factor[0]
+    if(rvLast != 0){throw toStdJson({code: 'S026'})}
+
+    //获取数据
+    reject = select * from review_info where reviewId = uuid(param.review_id) context by reviewer limit -1
+    reject = select * from reject where status = 0
+
+    //保存审批人
+    receivers = exec reviewer from reject
+    receivers = receivers[!(user == receivers)]
+
+    //该条审批是否是二次发布
+    pub = select * from public_info where fid = reject.fid[0] context by deptName limit -1
+    pub = select * from pub where isDeleted = false
+    pubDept = exec deptName from pub //目前已公开的系统或部门
+    if (pubDept.count() != 0){isRepublish = true}else{isRepublish = false}
+
+    //不是二次发布
+    if ((isRepublish == false) or (!(reject.reviewDept[0] in pubDept))){
+        //审批驳回，若多个审批人，则只记录一条
+        update reject set status = -1, reviewer = user, uploadTime = now(), note = param.suggestion
+        rejection = select * from reject limit 1
+        review_info.append!(rejection)
+
+        receivers.append!(rejection.submitter)
+        for(er in receivers){
+            facplf_send_msg(user, er, 3, rejection.reviewId, "factor")}
+
+    }else{
+        //其他部门审核情况
+        repub = select * from review_info where fid = pub.fid[0] and reviewDept	in pubDept context by reviewDept limit -1
+        repub = select * from repub where status in [0, 3]
+
+        //拒绝所有必填部门的审核
+        update repub set status = -1, note = string(NULL)
+        update repub set reviewer = user, uploadTime = now(), note = param.suggestion where reviewId = uuid(param.review_id) //将最后一个部门的审核人、发布时间等更新
+        review_info.append!(repub)
+
+        //发送消息
+        others = exec reviewer from repub where reviewId != uuid(param.review_id)
+        receivers.append!(others)
+        receivers.append!(repub.submitter[0])
+        for(er in receivers){
+                facplf_send_msg(user, er, 3, uuid(param.review_id), "factor")}
+
+    }
+}
+
+
+//获取我审批的模板列表
+def facplf_get_my_temp_review_list(param){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+    res = dict(STRING, ANY)
+    
+    if (param.scope == NULL){
+        rvId = exec reviewId from review_info where reviewer = user context by reviewId limit -1
+    }else{
+        //获得当前部门下审批人的所有审批记录
+        rvId = exec reviewId from review_info where reviewer = user and reviewDept = param.scope context by reviewId limit -1
+    }
+    //如果没有数据，则返回NULL
+    if (count(rvId) == 0){res["items"] = [];res["total"] = 0;return res}
+    // 按提交时间倒序排
+    pre = select reviewId, uploadTime from review_info where reviewId in rvId and status = 0 order by uploadTime desc
+    rvlist = exec distinct reviewId from pre
+    
+    item_list = []
+    for(i in rvlist){// i = 
+        //获取该条审批下最新的信息
+        rv = select * from review_info where reviewId = i context by reviewId limit -1
+        //获取该条审批发布时的信息
+        subinfo = select * from review_info where reviewId = i and status = 0
+        submit_time = subinfo.uploadTime[0]
+        rvers = exec reviewer from subinfo
+        note = subinfo.note[0] //发布备注
+        //审批结果
+        if (rv.status in [-1,1]){suggestion = rv.note[0]} else{suggestion = string(NULL)}
+        
+        item = dict(STRING, ANY)
+        item["review_id"] = rv.reviewId[0]
+        item["submitter"] = rv.submitter[0]
+        item["submit_time"] = submit_time
+        item["scope"] = rv.reviewDept[0]	
+        item["reviewers"] = rvers
+        item["status"] = rv.status[0]
+        item["note"] = note
+        item["suggestion"] = suggestion
+        
+        //二次发布
+        pub = select * from public_info where tempId = rv.tempId[0] and deptName = rv.reviewDept[0] context by tempId limit -1
+        pub = select * from pub where isDeleted = false
+        if (pub.count() != 0){isRepublish = true}else{isRepublish = false}
+        
+        template = dict(STRING, ANY)
+        template["id"] = rv.tempId[0]
+        template["name"] = rv.tempName[0]
+        template["type"] = rv.tempCat[0]
+        template["properties"] = rv.factorCat[0]
+        template["creator"] = rv.username[0]
+        template["comment"] = rv.comment[0]
+        template["code"] = rv.tempCode[0]
+        template["is_republish"] = isRepublish
+        
+        item["template"] = template
+        
+        item_list.append!(item)
+    }
+    
+    
+    res["items"] = item_list
+    res["total"] = item_list.count()
+    
+    return res    
+}
+
+
+//通过模板审批
+def facplf_approve_temp(param){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+
+    //检查该条审批下的最新状态
+    temp = exec status from review_info where reviewId = uuid(param.review_id) context by reviewId limit -1
+    rvLast = temp[0]
+    if(rvLast != 0){throw toStdJson({code: 'S026'})}
+
+    //获取数据
+    approve = select * from review_info where reviewId = uuid(param.review_id) context by reviewer limit -1
+    approve = select * from approve where status = 0
+
+    //消息：保存审批人
+    receivers = exec reviewer from approve
+    receivers = receivers[!(user == receivers)]
+
+    //该条审批是否是二次发布
+    pub = select * from public_info where tempId = approve.tempId[0] context by deptName limit -1
+    pub = select * from pub where isDeleted = false
+    pubDept = exec deptName from pub //目前已公开的系统或部门
+    if (pubDept.count() != 0){isRepublish = true}else{isRepublish = false}
+
+    //不是二次发布
+    if (isRepublish == false){
+        //审批通过，若有多个审批人，则只记录当前审批人的一条
+        update approve set status = 1, reviewer = user, uploadTime = now(), note = param.suggestion
+        approval = select * from approve limit 1
+        review_info.append!(approval)
+
+        //发送消息
+        receivers.append!(approval.submitter)
+        for(er in receivers){
+            facplf_send_msg(user, er, 2, approval.reviewId, "template")}
+
+        //存入公开因子表
+        public_info.tableInsert(
+            table(
+                approval.tempId as `tempId,
+                approval.tempName as `tempName,
+                approval.username as `username,
+                approval.tempCat as `tempCat,
+                approval.comment as `comment,
+                approval.reviewDept as `deptName,
+                approval.reviewer as `reviewer,
+                approval.uploadTime as `reviewTime,
+                approval.factorCat as `factorCat,
+                approval.tags as `tags,
+                approval.tempCode as `tempCode,
+                false as isDeleted,
+                string(NULL) as remover
+            )
+        )
+
+    }else{
+        //是二次发布
+        //需要确定二次发布时所有部门系统的审批通过情况
+        repub = select * from review_info where tempId = pub.tempId[0] context by reviewDept limit -1
+        repub = select * from repub where status in [0, 3]
+
+        others = exec status from repub where reviewId != uuid(param.review_id) and reviewDept in pubDept
+
+        if (0 in others){
+            //若其他必填部门还未全部审核结束，则记录当前状态为3。
+            update approve set status = 3, reviewer = user, uploadTime = now(), note = param.suggestion
+            approval = select * from approve limit 1
+            review_info.append!(approval)
+
+            //消息发送
+            for(er in receivers){
+            facplf_send_msg(user, er, 5, approval.reviewId, "template")}
+
+            return {"is_published": false}
+
+        }else{
+            //若其他必填部门审核已结束，则公开该因子。
+            update repub set status = 1 where status = 3 //将必填部门已通过的状态更新为1
+            update repub set status = 1, reviewer = user, uploadTime = now(), note = param.suggestion where reviewId = uuid(param.review_id) //将最后一个必填部门的审核人、发布时间等更新
+            repub = select * from repub where status = 1
+            review_info.append!(repub)
+
+            //发送消息
+            othermsg = exec reviewer from repub where reviewId != uuid(param.review_id)
+            receivers.append!(othermsg)
+            receivers.append!(repub.submitter[0])
+            for(er in receivers){
+                facplf_send_msg(user, er, 2, uuid(param.review_id), "template")}
+
+            //存入公开因子表
+            for(approval in repub){
+                public_info.tableInsert(
+                    table(
+                        approval.tempId as `tempId,
+                        approval.tempName as `tempName,
+                        approval.username as `username,
+                        approval.tempCat as `tempCat,
+                        approval.comment as `comment,
+                        approval.reviewDept as `deptName,
+                        approval.reviewer as `reviewer,
+                        approval.uploadTime as `reviewTime,
+                        approval.factorCat as `factorCat,
+                        approval.tags as `tags,
+                        approval.tempCode as `tempCode,
+                        false as isDeleted,
+                        string(NULL) as remover)
+                )
+            }
+        }
+    }
+    return {"is_published": true}
+}
+
+
+//批量通过模板审批
+def facplf_approve_multi_temps(param){
+    notpublish = 0
+    for (i in param.reviews){
+        rv = dict(STRING, ANY)
+        rv["review_id"] = i
+        rv["suggestion"] = param.suggestion
+
+        res = facplf_approve_temp(rv)
+        if (res.is_published == false){
+            notpublish += 1
+        }
+    }
+    if(notpublish == 0){
+        return {"is_all_published": true}
+    }else{
+        return {"is_all_published": false}
+    }
+}
+
+//拒绝模板审批
+def facplf_reject_temp(param){
+    user = getCurrentSessionAndUser()[1]
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+
+    //检查该条审批下的最新状态
+    temp = exec status from review_info where reviewId = uuid(param.review_id) context by reviewId limit -1
+    rvLast = temp[0]
+    if(rvLast != 0){throw toStdJson({code: 'S026'})}
+
+
+    //获取数据
+    reject = select * from review_info where reviewId = uuid(param.review_id) context by reviewer limit -1
+    reject = select * from reject where status = 0
+
+    //保存审批人
+    receivers = exec reviewer from reject
+    receivers = receivers[!(user == receivers)]
+
+
+    //该条审批是否是二次发布
+    pub = select * from public_info where tempId = reject.tempId[0] context by deptName limit -1
+    pub = select * from pub where isDeleted = false
+    pubDept = exec deptName from pub //目前已公开的系统或部门
+    if (pubDept.count() != 0){isRepublish = true}else{isRepublish = false}
+
+    //不是二次发布
+    if ((isRepublish == false) or (!(reject.reviewDept[0] in pubDept))){
+        //审批驳回，若多个审批人，则只记录一条
+        update reject set status = -1, reviewer = user, uploadTime = now(), note = param.suggestion
+        rejection = select * from reject limit 1
+        review_info.append!(rejection)
+
+        receivers.append!(rejection.submitter)
+        for(er in receivers){
+            facplf_send_msg(user, er, 3, rejection.reviewId, "template")}
+
+    }else{
+        //其他部门审核情况
+        repub = select * from review_info where tempId = pub.tempId[0] and reviewDept in pubDept context by reviewDept limit -1
+        repub = select * from repub where status in [0, 3]
+
+        //拒绝所有必填部门的审核
+        update repub set status = -1, note = string(NULL)
+        update repub set reviewer = user, uploadTime = now(), note = param.suggestion where reviewId = uuid(param.review_id)
+        review_info.append!(repub)
+
+        //发送消息
+        others = exec reviewer from repub where reviewId != uuid(param.review_id)
+        receivers.append!(others)
+        receivers.append!(repub.submitter[0])
+        for(er in receivers){
+                facplf_send_msg(user, er, 3, uuid(param.review_id), "template")}
+
+    }
+}

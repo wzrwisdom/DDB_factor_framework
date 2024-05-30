@@ -99,7 +99,6 @@ def combineFeaturesForCodes(fromDbNameDict, fromTbNameDict, featureDict, startDa
             feature_comb = sql(select=cols, from=feature_comb).eval()
         }
         
-        feature_tb=NULL
     }
     return feature_comb
 }
@@ -151,7 +150,7 @@ def saveTb(input, facDbName, facTbName){
     loadTable(facDbName, facTbName).append!(data)
 }
 
-def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate, endDate, factorName, oriName, tarName, securityidName, tradetimeName, toDbName="dfs://secondLevelDB", toTbName="freq_6sec"){
+def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate, endDate, factorName, oriName, tarName, securityidName, tradetimeName, toDbName, toTbName){
     // 字符串转换为字典
     fromDbNameDict = parseExpr(fromDbNameStr).eval()
     fromTbNameDict = parseExpr(fromTbNameStr).eval()
@@ -160,11 +159,15 @@ def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate,
     allcodes = sql(select=sqlColAlias(<distinct security_code>), 
         from=loadTable("dfs://CROSS_SECTION_6sec", "trade_info"),
         where=expr(sqlCol("trade_time", date),==,startDate)).eval()
-    codes_list = cut(allcodes, 200)
+    codes_list = cut(allcodes, 10)
     // codes = codes[:10]
+    index = 0
     for (codes in codes_list) {
+        index+=1
+        print("正在计算"+factorName+"的第"+string(index)+"批")
         features = combineFeaturesForCodes(fromDbNameDict, fromTbNameDict, featureDict, 
             startDate, endDate, securityidName, tradetimeName, codes)
+        // print(select * from features limit 10)
         result = calculate_new_factor(features, factorName, oriName, tarName, securityidName="securityid", tradetimeName="tradetime")
         unifiedCall(saveTb, (result, toDbName, toTbName))
         // 手动清除TSDB占用的缓冲，否则系统10min调用一次

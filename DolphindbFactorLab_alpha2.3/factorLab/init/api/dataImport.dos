@@ -1,0 +1,708 @@
+/////////////////////
+///////函数库////////
+/////////////////////
+
+// 获取数据导入函数库列表
+def facplf_data_import_lib_list() {
+    user = getCurrentSessionAndUser()[1]
+    lib_tb = loadTable("dfs://data_module_info", "module_info")
+    user_info = last(select isReviewer, isImporter from loadTable("dfs://mgmt_user_info", "user_info") where username = user)
+    dept_info = select isDeptAdmin, isDeptimporter from loadTable("dfs://mgmt_dept_info", "dept_info") where username = user context by deptName limit -1
+    
+    // 权限验证
+    // 公司admin，公司reviewer，部门admin，数据导入人员
+    if ((user != "admin") and user_info.isReviewer[0] == false and user_info.isImporter[0] == false and any(dept_info.isDeptAdmin) == false and any(dept_info.isDeptimporter) == false) {
+        throw toStdJson({code:"S057"})
+    }
+
+    lib_display = select * from lib_tb order by dlid, updateTime desc
+    lib_display = select * from lib_display context by dlid limit 1
+    lib_display = select * from lib_display where isDeleted = false
+
+    tmp = select dlid as lib_id, moduleName as name, tags, iif(username == "DolphinDB", false, true) as is_custom, createTime as create_time, updateTime as update_time, username as creator, comment, code as source_code from lib_display order by createTime desc
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`items] = tmp
+    tmp_dict[`total] = size(tmp)
+
+    return tmp_dict
+}
+
+// 新建数据导入函数库
+def facplf_create_new_data_import_lib(param) {
+    user = getCurrentSessionAndUser()[1]
+    module_info = loadTable("dfs://data_module_info", "module_info")
+    template_info = loadTable("dfs://data_template_info", "template_info")
+
+    lib_tb = select * from module_info context by dlid csort updateTime limit -1
+    lib_tb = select * from lib_tb where isDeleted = false
+    //获取所有导入模板名称
+    temp_tb = select dtid, templateName, updateTime, isDeleted from template_info order by dtid, updateTime desc
+    temp_tb = select * from temp_tb context by dtid limit 1
+    temp_tb = exec templateName from temp_tb where isDeleted = false
+    // 与现有导入函数名称进行重名检查
+    if (param.name in temp_tb) {
+        throw toStdJson({code: "S100"})// message: 该数据导入函数库名称与已有数据导入模板名称重复
+    }
+    // 检查重名
+    existing_names = exec distinct moduleName from lib_tb
+    if (param.name in existing_names) {
+        throw toStdJson({code:"S054"})
+    }
+
+    template_firstline = "module " + param.name
+    template_code = string((exec code from module_info where username = "DolphinDB" and moduleName = "demo" limit 1)[0]).strReplace('module demo\n', '')
+    temp_code = template_firstline + "\n" + template_code
+
+    // 标签
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 2)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    new_dlid = rand(uuid(), 1)[0]
+    tb = table(new_dlid as dlid, param.name as moduleName, user as username, now() as createTime, now() as updateTime, blob(temp_code) as code, concat(tmp_tags, ",") as tags, string(param.comment) as comment, false as isDeleted)
+    module_info.append!(tb)
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`lib_id] = new_dlid
+    return tmp_dict
+}
+
+// 删除数据导入函数库
+def facplf_delete_data_import_lib(param) {
+    user = getCurrentSessionAndUser()[1]
+    module_info = loadTable("dfs://data_module_info", "module_info")
+
+    // dlid是否存在
+    lib_id = uuid(param.lib_id)
+    lib_tb = select * from module_info where dlid = lib_id order by updateTime desc limit 1
+    lib_tb = select * from lib_tb where isDeleted = false
+    if (count(lib_tb) == 0) {throw toStdJson({code:"S056"})}
+
+    // 鉴权
+    access = facplf_get_user_access(user)
+    if (!((user == "admin") || access.isReviewer[0] || user == lib_tb.username[0])) {
+        throw toStdJson({code:"S057"})
+    }
+
+    // 删除
+    update lib_tb set updateTime = now(), code = string(NULL), tags = string(NULL), comment = user, isDeleted = true
+    module_info.append!(lib_tb)
+}
+
+// 获取数据导入函数库详情
+def facplf_data_import_lib_detail(param) {
+    // user = getCurrentSessionAndUser()[1]
+    lib_tb = select * from loadTable("dfs://data_module_info", "module_info") where dlid = uuid(param.lib_id) order by updateTime desc limit 1
+    lib_tb = select * from lib_tb where isDeleted = false
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`lib_id] = lib_tb.dlid[0]
+    tmp_dict[`name] = lib_tb.moduleName[0]
+    tmp_dict[`tags] = lib_tb.tags[0]
+    tmp_dict[`is_custom] = iif(lib_tb.username[0] == 'DDB' or lib_tb.username[0] == 'DolphinDB', false, true)
+    tmp_dict[`create_time] = lib_tb.createTime[0]
+    tmp_dict[`update_time] = lib_tb.updateTime[0]
+    tmp_dict[`creator] = lib_tb.username[0]
+    tmp_dict[`comment] = lib_tb.comment[0]
+    tmp_dict[`source_code] = facplf_parse_moduleCode(lib_tb.code[0])
+
+    return tmp_dict
+}
+
+
+// 修改数据导入函数库元信息
+// admin不要编辑权限，只有创建者能够修改
+def facplf_edit_data_import_lib(param) {
+    user = getCurrentSessionAndUser()[1]
+    lib_tb = loadTable("dfs://data_module_info", "module_info")
+    template_info = loadTable("dfs://data_template_info", "template_info")
+    //获取所有导入模板名称
+    temp_tb = select dtid, templateName, updateTime, isDeleted from template_info order by dtid, updateTime desc
+    temp_tb = select * from temp_tb context by dtid limit 1
+    temp_tb = exec templateName from temp_tb where isDeleted = false
+    // 与现有导入函数名称进行重名检查
+    if (param.name in temp_tb) {
+        throw toStdJson({code: "S100"})// message: 该数据导入函数库名称与已有数据导入模板名称重复
+    }
+
+    // dlid是否存在
+    existing_dlid = select dlid, isDeleted from lib_tb where username = user order by dlid, updateTime desc
+    existing_dlid = select dlid, isDeleted from existing_dlid context by dlid limit 1
+    existing_dlid = exec dlid from existing_dlid where isDeleted = false
+    if (!(uuid(param.lib_id) in existing_dlid)) {
+        throw toStdJson({code:"S056"})
+    }
+
+    user_tb = select * from lib_tb where username = user and dlid = uuid(param.lib_id) order by updateTime desc limit 1
+    prev_name = user_tb.moduleName[0]
+
+    // 可以和自己重名
+    existing_lib = select * from lib_tb order by dlid, updateTime desc
+    existing_lib = select moduleName, isDeleted from existing_lib context by dlid limit 1
+    existing_names = exec moduleName from existing_lib where isDeleted = false and moduleName != prev_name
+    if (param.name in existing_names) {throw toStdJson({code:"S054"})}
+
+    // tags更新
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 2)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    // 修改code中module xxx
+    prev_code = user_tb.code[0]
+    prev_code_funcs = concat(prev_code.split("\n")[1:], "\n")
+    new_code_first_line = "module " + param.name
+
+    tb = table(
+        uuid(param.lib_id) as dlid, 
+        param.name as moduleName, 
+        user as username, 
+        user_tb.createTime[0] as createTime, 
+        now() as updateTime, 
+        new_code_first_line + "\n" + prev_code_funcs as code, 
+        concat(tmp_tags, ",") as tags, 
+        string(param.comment) as comment, 
+        false as isDeleted)
+    lib_tb.append!(tb)
+}
+
+// 保存数据导入函数库代码
+def facplf_save_data_import_lib_code(param) {
+    user = getCurrentSessionAndUser()[1]
+    lib_tb = loadTable("dfs://data_module_info", "module_info")
+
+    // dlid是否在其名下存在
+    datalib = select * from lib_tb where username = user and dlid = uuid(param.lib_id) order by updateTime desc limit 1
+    datalib = select * from datalib where isDeleted = false
+    if (count(datalib) == 0) {throw toStdJson({code:"S056"})}
+
+    // 代码不能为空
+    if (param.code == NULL) {throw toStdJson({code:"S028"})}
+    
+    // 试运行
+    code_firstline = "module " + datalib.moduleName[0]
+    try {
+        loadModuleFromScript(datalib.moduleName, [code_firstline + "\n" + param.code], true)
+    } catch(ex) {throw toStdJson(dict(`code`variables,["S047", ex[0]+": "+ex[1]]))}
+    
+    update datalib set updateTime = now(), code = code_firstline + "\n" + string(param.code)
+    lib_tb.append!(datalib)
+}
+
+///////////////////
+///////模板////////
+///////////////////
+
+// 获取数据导入模板列表
+def facplf_data_import_template_list() {
+    user = getCurrentSessionAndUser()[1]
+    template_tb = loadTable("dfs://data_template_info", "template_info")
+    temp_run_tb = loadTable("dfs://data_run_info", "run_info")
+    user_info = last(select isReviewer, isImporter from loadTable("dfs://mgmt_user_info", "user_info") where username = user)
+    dept_info = select isDeptAdmin, isDeptimporter from loadTable("dfs://mgmt_dept_info", "dept_info") where username = user
+    
+    // 权限验证
+    // 公司admin，公司reviewer，部门admin，数据导入人员
+    if (user != "admin" and user_info.isReviewer[0] == false and user_info.isImporter[0] == false and any(dept_info.isDeptAdmin) == false and any(dept_info.isDeptimporter) == false) {
+        throw toStdJson({code:"S057"})
+    }
+
+    temp_display = select * from template_tb order by dtid, updateTime desc
+    temp_display = select * from temp_display context by dtid limit 1
+    temp_display = select * from temp_display where isDeleted = false
+
+    tmp_cnt = select * from temp_run_tb where username = user and isDeleted = false 
+    tmp_cnt = select dtid, count(*) as run_record_count from tmp_cnt context by dtid
+    tmp_cnt = select distinct * from tmp_cnt
+
+    merge = select dtid as template_id, templateName as name, tags, run_record_count, iif(username == "DolphinDB", false, true) as is_custom, createTime as create_time, updateTime as update_time, username as creator, comment, code as source_code from temp_display left join tmp_cnt on temp_display.dtid = tmp_cnt.dtid order by create_time desc
+    update merge set run_record_count=run_record_count.nullFill(0)
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`items] = merge
+    tmp_dict[`total] = size(merge)
+
+    return tmp_dict
+}
+
+// 新建数据导入模板
+def facplf_create_new_data_import_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://data_template_info", "template_info")
+    module_info = loadTable("dfs://data_module_info", "module_info")
+    // 与现有 DolphinDB 内置函数进行重名检查
+    if (count(defs(param.name)) != 0){
+        throw toStdJson(dict(`code`variables, ["S091", param.name]))
+    }
+    //获取所有函数库
+    md_tb = select * from module_info order by dlid, updateTime desc
+    md_tb = select * from md_tb context by dlid limit 1
+    md_tb = select * from md_tb where isDeleted = false
+    // 与现有导入函数名称进行重名检查
+    if (param.name in md_tb.moduleName) {
+        throw toStdJson({code: "S099"})// message: 该数据导入模板名称与已有数据导入函数库名称重复
+    }
+
+    temp_tb = select * from template_info order by dtid, updateTime desc
+    temp_tb = select * from temp_tb context by dtid limit 1
+    temp_tb = select * from temp_tb where isDeleted = false
+
+    // 检查重名
+    existing_names = exec distinct templateName from temp_tb
+    if (param.name in existing_names) {throw toStdJson({code:"S058"})}
+    
+    //预设模板
+    template_code = exec code from template_info where username = "DolphinDB" and templateName = "demoMain" order by createTime limit 1
+        
+    // 生成：函数名和模板名一致
+    def_pos = strpos(template_code, 'def')
+    ct_code = substr(template_code, def_pos, strlen(template_code))
+    end_pos = strpos(ct_code, "(") + def_pos
+    
+    func_name = substr(template_code, def_pos+4, end_pos-4-def_pos).strReplace(" ", "")
+    part1 = substr(template_code, 0, def_pos+4)
+    part2 = substr(template_code, end_pos, strlen(template_code))
+    new_code = part1 + param.name + part2
+
+    // 试运行
+    if (count(new_code) > 0) {
+        try {
+            each(loadModuleFromScript, md_tb.moduleName, md_tb.code, true)
+            loadModuleFromScript(param.name, "module " + param.name + "\n" + new_code, true)
+            } catch(ex) {throw toStdJson(dict(`code`variables,["S047", ex[0]+": "+ex[1]]))}
+        tmp_module_name = param.name + "::%"
+        tmp_params = select syntax from defs() where name like tmp_module_name
+        params = substr(tmp_params.syntax[0], 1, strlen(tmp_params.syntax[0])-2)
+    } else {
+        params = string(NULL)
+        new_code = string(NULL)
+    }
+
+    // 运行成功
+    // 标签
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where isVoid(tag) = false
+    try{facplf_save_tag(tmp_tags, 3)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    new_dtid = rand(uuid(), 1)
+    tb = table(
+        new_dtid[0] as dtid, 
+        param.name as templateName, 
+        user as username, 
+        now() as createTime, 
+        now() as updateTime, 
+        new_code as code, 
+        string(params) as parameter, 
+        concat(tmp_tags, ",") as tags, 
+        string(param.comment) as comment, 
+        false as isDeleted)
+    loadTable("dfs://data_template_info", "template_info").append!(tb)
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`template_id] = new_dtid[0]
+    return tmp_dict
+}
+
+// 删除数据导入模板
+def facplf_delete_data_import_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    temp_tb = loadTable("dfs://data_template_info", "template_info")
+    user_info = select isReviewer from loadTable("dfs://mgmt_user_info", "user_info") where username = user
+
+    // dtid是否存在
+    existing_dtid = select dtid, isDeleted from temp_tb order by dtid, updateTime desc
+    existing_dtid = select dtid, isDeleted from existing_dtid context by dtid limit 1
+    existing_dtid = exec dtid from existing_dtid where isDeleted = false
+    if (!(uuid(param.template_id) in existing_dtid)) {
+        throw toStdJson({code:"S059"})
+    }
+
+    delete_dtid = select * from temp_tb where dtid = uuid(param.template_id) order by updateTime desc limit 1
+
+    // 删除权限-admin
+    if ((user == "admin") or user_info.isReviewer[0] == true or user == delete_dtid.username[0]) {
+        tb = table(
+            uuid(param.template_id) as dtid, 
+            string(NULL) as templateName, 
+            user as username, 
+            now() as createTime, 
+            now() as updateTime, 
+            string(NULL) as code, 
+            string(NULL) as parameter, 
+            string(NULL) as tags, 
+            string(NULL) as comment, 
+            true as isDeleted)
+        temp_tb.append!(tb)
+    } else {
+        throw toStdJson({code:"S057"})
+    }
+}
+
+// 获取数据导入模板参数
+def facplf_get_data_import_template_params(param) {
+    temp_tb = loadTable("dfs://data_template_info", "template_info")
+    param_info = loadTable("dfs://preset_param_info", "param_info")
+    
+    ddb_preset = string(exec dtid from temp_tb where username = "DolphinDB");
+    if (param.template_id in ddb_preset) {
+        ret = (exec preset from param_info where presetType = 'data_import_template_' + string(param.template_id) and username = 'DolphinDB')[0]
+        ret = fromJson(ret)
+        return ret
+    } else {
+        //用户自定义模板
+        existing_dtid = select dtid, isDeleted from temp_tb order by dtid, updateTime desc
+        existing_dtid = select dtid, isDeleted from existing_dtid context by dtid limit 1
+        existing_dtid = exec dtid from existing_dtid where isDeleted = false
+        if (!(uuid(param.template_id) in existing_dtid)) {
+            throw toStdJson({code:"S059"})
+        }
+        temp_param = select parameter from temp_tb where dtid = uuid(param.template_id) order by updateTime desc limit 1
+        res = array(ANY)
+        if (count(temp_param.parameter) != 0) {
+            for (p in temp_param.parameter[0].split(",")) {
+                tmp = dict(STRING, ANY)
+                tmp[`name] = p
+                tmp[`type] = NULL
+                res.append!(tmp)
+            }
+        }
+        return res  
+    }
+}
+
+// 获取数据导入模板详情
+def facplf_data_import_template_detail(param) {
+    user = getCurrentSessionAndUser()[1]
+    temp_run_tb = loadTable("dfs://data_run_info", "run_info")
+    template_info = loadTable("dfs://data_template_info", "template_info")
+    temp_tb = select * from template_info where dtid = uuid(param.template_id) order by updateTime desc limit 1
+    temp_tb = select * from temp_tb where isDeleted = false
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`template_id] = temp_tb.dtid[0]
+    tmp_dict[`name] = temp_tb.templateName[0]
+    tmp_dict[`tags] = temp_tb.tags[0]
+    tmp_dict[`is_custom] = iif(temp_tb.username[0] == 'DDB' or temp_tb.username[0] == 'DolphinDB', false, true)
+    tmp_dict[`create_time] = temp_tb.createTime[0]
+    tmp_dict[`update_time] = temp_tb.updateTime[0]
+    tmp_dict[`creator] = temp_tb.username[0]
+    tmp_dict[`comment] = temp_tb.comment[0]
+    tmp_dict[`source_code] = temp_tb.code[0]
+    
+    tmp_cnt = select * from temp_run_tb where isDeleted = false and dtid = uuid(param.template_id)
+    tmp_cnt = select dtid, count(*) as run_record_count from tmp_cnt context by dtid
+    tmp_cnt = select distinct * from tmp_cnt
+
+    if (size(tmp_cnt) == 0) {
+        tmp_dict[`run_record_count] = 0
+    } else {
+        tmp_dict[`run_record_count] = tmp_cnt.run_record_count[0]
+    }
+
+    return tmp_dict
+}
+
+
+// 修改数据导入模板元信息
+def facplf_edit_data_import_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    temp_tb = loadTable("dfs://data_template_info", "template_info")
+    module_info = loadTable("dfs://data_module_info", "module_info")
+    // 与现有 DolphinDB 内置函数进行重名检查
+    if (count(defs(param.name)) != 0 && defs(param.name).userDefined[0] == false) {
+        throw toStdJson(dict(`code`variables, ["S091", param.name]))
+    }
+    //获取所有函数库
+    md_tb = select * from module_info order by dlid, updateTime desc
+    md_tb = select * from md_tb context by dlid limit 1
+    md_tb = select * from md_tb where isDeleted = false
+    // 与现有导入函数名称进行重名检查
+    if (param.name in md_tb.moduleName) {
+        throw toStdJson({code: "S099"})// message: 该数据导入模板名称与已有数据导入函数库名称重复
+    }
+    existing_dtid = select dtid, isDeleted from temp_tb order by dtid, updateTime desc
+    existing_dtid = select dtid, isDeleted from existing_dtid context by dtid limit 1
+    existing_dtid = exec dtid from existing_dtid where isDeleted = false
+    if (!(uuid(param.template_id) in existing_dtid)) {
+        throw toStdJson({code:"S059"})
+    }
+
+    user_tb = select * from temp_tb where username = user and dtid = uuid(param.template_id) order by updateTime desc limit 1
+    prev_name = user_tb.templateName[0]
+
+    // 可以和自己重名
+    existing_temp = select * from temp_tb order by dtid, updateTime desc
+    existing_temp = select templateName, isDeleted from existing_temp context by dtid limit 1
+    existing_temp = exec templateName from existing_temp where isDeleted = false and templateName != prev_name
+    if (param.name in existing_temp) {
+        throw toStdJson({code:"S058"})
+    }
+    // code函数名更新
+    new_code = facplf_edit_code(user_tb.code[0], user_tb.templateName[0], param.name)
+    // tags更新
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 3)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    tb = table(uuid(param.template_id) as dtid, param.name as templateName, user as username, user_tb.createTime as createTime, now() as updateTime, new_code as code, string(user_tb.parameter) as parameter, concat(tmp_tags, ",") as tags, string(param.comment) as comment, false as isDeleted)
+
+    temp_tb.append!(tb)
+}
+
+// 保存数据导入模板代码
+def facplf_edit_data_import_template_code(param) {
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://data_template_info", "template_info")
+    module_info = loadTable("dfs://data_module_info", "module_info")
+    
+    // dtid是否存在
+    temp_tb = select * from template_info where username = user and dtid = uuid(param.template_id) order by updateTime desc limit 1
+    temp_tb = select * from temp_tb where isDeleted = false
+    if(size(temp_tb)==0){throw toStdJson({code:"S059"})}
+    //预设函数
+    md_tb = select * from module_info order by dlid, updateTime desc
+    md_tb = select * from md_tb context by dlid limit 1
+    md_tb = select * from md_tb where isDeleted = false
+    // 代码校验, 获取参数
+    params = facplf_code_check_run_clear_cache(param.code, md_tb, temp_tb.templateName[0])
+    // 写表
+    tb = table(uuid(param.template_id) as dtid, temp_tb.templateName[0] as templateName, user as username, temp_tb.createTime as createTime, now() as updateTime, param.code as code, string(params) as parameter, temp_tb.tags as tags, temp_tb.comment as comment, false as isDeleted)
+    template_info.append!(tb)
+}
+
+// 解析数据导入任务返回结果
+def facplf_parse_data_import_job_return(jobId, node) {
+    // 获取数据导入任务返回结果
+    // 固定返回 status, failed_reason
+    failed_reason = string(NULL)
+    try {
+        res = rpc(node, getJobReturn, jobId)
+    } catch(ex) {
+        if(like(ex[1], "%not complete%")){
+            status = 0
+        } else {
+            // 失败返回错误信息
+            status = -1
+            failed_reason = rpc(node, getJobMessage, jobId)
+        }
+        return status, failed_reason
+    }
+
+    // 成功则解析返回Id
+    if (typestr(res) == "STRING") {
+        try {
+            status = facplf_get_job_status(res, NULL, node)
+        } catch(ex) {
+            status = -1
+            failed_reason = ex[1]
+            return status, failed_reason
+        }
+        if (status == -1) {
+            failed_reason = rpc(node, getJobMessage, jobId)
+        }
+    } else if (typestr(res) like "%VECTOR") {
+        multi_status = array(ANY)
+        try {
+            for(job in res) {//job = res[0]
+                status_tb = rpc(node, getJobStatusById, job)
+                status = facplf_parse_job_status(status_tb)
+                multi_status.append!(status)
+            }
+        } catch(ex) {
+            status = -1
+            failed_reason = "解析任务失败, 并未返回正确任务Id"
+            return status, failed_reason
+        }
+        status = facplf_get_multi_tests_status(multi_status)
+        if (status == -1) {
+            msg = each(rpc{node, getJobMessage,}, res)
+            failed_reason = concat(msg)
+        }
+    } else {
+        status = 1
+    }
+    return status, failed_reason
+}
+
+// 查询导入记录（分页）
+def facplf_get_data_import_records(param) {
+    user = getCurrentSessionAndUser()[1]
+    run_info = loadTable("dfs://data_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+
+    id = uuid(param.template_id)
+    temp_run = select * from run_info where dtid = id and username = user and isDeleted = false
+    if(count(temp_run)==0){return dict(`items`total, [array(any), 0])}
+
+    status_all = array(ANY)
+    for(r in temp_run) {// r = temp_run[0]
+        status_tb = rpc(r.clusterNode, getJobStatusById, r.jobId)
+        status = facplf_parse_job_status(status_tb)
+        status_all.append!(status)
+    }
+
+    temp_run["status"] = status_all
+
+    tmp = select drid as import_record_id, dtid as template_id, templateName as template_name, createTime as create_time, username as creator, status, dbname as db_name, tbname as tb_name from temp_run order by createTime desc
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`items] = tmp
+    tmp_dict[`total] = size(tmp)
+
+    return tmp_dict
+}
+
+
+// 获取导入记录详情
+def facplf_get_data_import_record_detail(param) {
+    user = getCurrentSessionAndUser()[1]
+    run_info = loadTable("dfs://data_run_info", "run_info")
+
+    id = uuid(param.import_record_id)
+    temp_run = select * from run_info where drid = id context by drid limit -1
+    temp_run = select * from temp_run where isDeleted = false
+
+    // 解析系统发送的任务状态
+    jobId = temp_run.jobId[0]
+    node = temp_run.clusterNode[0]
+    status_tb = rpc(node, getJobStatusById, jobId)
+    status = facplf_parse_job_status(status_tb)
+
+    // 解析用户返回的任务状态
+    if (status == -1) {
+        status, failed_reason = facplf_parse_data_import_job_return(jobId, node)
+    } else if(status == 0){
+        failed_reason = string(NULL)
+    } else {
+        failed_reason = rpc(node, getJobMessage, jobId)
+    }
+
+    result = dict(STRING, ANY)
+    if (status in [1, -2] && (count(temp_run.dbname) != 0 && count(temp_run.tbname) != 0)) {
+        try {
+            result[`data] = select * from loadTable(temp_run.dbname[0], temp_run.tbname[0]) limit 100
+            result[`cols] = result[`data].columnNames()
+        } catch(ex) {
+            status = -1
+            failed_reason = ex[0] + ": " + ex[1]
+        }
+    }
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`import_record_id] = param.import_record_id
+    tmp_dict[`template_id] = temp_run.dtid[0]
+    tmp_dict[`template_name] = temp_run.templateName[0]
+    tmp_dict[`create_time] = temp_run.createTime[0]
+    tmp_dict[`creator] = temp_run.username[0]
+    tmp_dict[`status] = status
+    tmp_dict[`db_name] = temp_run.dbname[0]
+    tmp_dict[`tb_name] = temp_run.tbname[0]
+    tmp_dict[`params] = string(temp_run.parameter[0])
+    tmp_dict[`result] = result
+    tmp_dict[`failed_reason] = failed_reason
+
+    return tmp_dict
+}
+
+// 提出数据导入模板参数
+def facplf_extract_data_template(templates){//templates = param.template_params
+    dbName = string(NULL)
+    tbName = string(NULL)
+
+    tmp = dict(STRING, ANY)
+    for (params in templates) {//params = templates[0]
+        tmp[params.name] = facplf_extract_control_type(params)
+
+        // 检查导入数据库表名称
+        if (params.name == 'dbName' || params.name == 'dbname'){
+            dbName = string(params.value)
+        }
+        if (params.name == 'tbName' || params.name == 'tbName'){
+            tbName = string(params.value)
+        }
+    }
+
+    ret = dict(STRING,ANY)
+    ret['parameters'] = tmp
+    ret['dbName'] = dbName
+    ret['tbName'] = tbName
+    return ret
+}
+
+// 运行数据导入
+def facplf_run_data_import(param) {
+    user = getCurrentSessionAndUser()[1]
+    status_info = loadTable("dfs://job_status_info", "status_info") 
+    template_info = loadTable("dfs://data_template_info", "template_info")
+    module_info = loadTable("dfs://data_module_info", "module_info")
+    run_info = loadTable("dfs://data_run_info", "run_info")
+    
+    // 加载函数库
+    all_lib = select * from module_info context by dlid limit -1;
+    all_lib = select moduleName, code from all_lib where isDeleted = false;
+    for(lib in all_lib) {
+        try{loadModuleFromScript(lib.moduleName, lib.code, true)}catch(ex){}
+    }
+    
+    // 加载模板
+    id = uuid(param.template_id)
+    temp_info = select * from template_info where dtid = id context by dtid limit -1
+    temp_info = select code, templateName, parameter from temp_info where isDeleted = false
+    if(count(temp_info)==0){throw toStdJson({code:"S059"})}
+
+    template_code = temp_info.code[0]
+    template_name = temp_info.templateName[0]
+    try{
+        loadModuleFromScript(template_name, template_code, true)
+    }catch(ex){
+        throw toStdJson({code:"S060"})
+    }
+
+    // 参数解析
+    template_params = facplf_extract_data_template(param.template_params)
+    parameters = template_params.parameters
+
+    // 生成任务参数
+    drid = rand(uuid(),1)
+    jobId = user + "_" + template_name + "_" + string(drid[0]).strReplace(string('-'),string('_'))
+
+    ro = array(ANY)
+    ro.append!(jobId)
+    ro.append!(template_name)
+    ro.append!(funcByName(template_name+"::"+template_name))
+    if (count(temp_info.parameter) != 0) {
+        for (i in temp_info.parameter[0].split(',')) {
+            ro.append!(parameters[i])
+        }
+    }
+    
+    dbName = template_params.dbName
+    tbName = template_params.tbName
+
+    // submitJob
+    jobId = unifiedCall(funcByName("submitJob"), ro)
+
+    res_tb = table(
+        drid as drid, 
+        uuid(param.template_id) as dtid, 
+        template_name as templateName, 
+        user as username, 
+        jobId as jobId, 
+        now() as createTime, 
+        blob(toStdJson(param.template_params)) as parameter, 
+        dbName as dbname, 
+        tbName as tbname, 
+        getNodeAlias() as clusterNode, 
+        false as isDeleted)
+
+    run_info.append!(res_tb)
+
+    //加入状态表
+    jobtb = getJobStatus(jobId)
+    jobtb = select 4 as jobType, * from jobtb
+    status_info.append!(jobtb)
+
+    ret = dict(STRING,ANY)
+    ret["import_record_id"] = drid[0]
+    return ret
+}

@@ -1,0 +1,43 @@
+def alphalensMain(factorResult, 
+    priceTable, priceDate, startDate, endDate, priceSymbol, priceCol,
+    quantile=5,
+    period="1,5,10", 
+    filter_zscore=20, 
+    max_loss=0.35, 
+    zero_aware=false, 
+    cumulative_returns=true, 
+    long_short=true) {
+        
+    factor = select tradetime, securityid, value from factorResult
+
+    //prices
+    whereConditions = expr(startDate, <=, sqlCol(priceDate), <=, endDate)
+    pivotBy = [sqlColAlias(sqlCol(priceDate), `date), sqlCol(priceSymbol)]
+    prices = sql(select=sqlCol(priceCol), from=priceTable, where=whereConditions, groupBy=pivotBy, groupFlag=2).eval();
+
+    //Empty groupby or groupby_labels
+    groupby = NULL
+    groupby_labels = NULL
+    binning_by_group=false
+    group_neutral=false
+    by_group=false
+
+    //quantiles
+    quantiles = int(quantile)
+    bins = NULL
+
+    //periods
+    periods = int(period.split(","))
+
+    // alpahlens
+    dicts = alphalens::plot_factorAnalysis(factor=factor, prices=prices, groupby=groupby,binning_by_group=binning_by_group,quantiles=quantiles,bins=bins,periods=periods,filter_zscore=filter_zscore,groupby_labels=groupby_labels,max_loss=max_loss,zero_aware=zero_aware,cumulative_returns=cumulative_returns,long_short=long_short,group_neutral=group_neutral,by_group=by_group)
+
+    // res: key+table
+    res = alphalens::extractTables(dicts)
+
+    result = alphalens::reframeSomeTable(res)
+    
+    result["periods"] = dict(0..(count(periods)-1), periods)
+
+    return result
+}

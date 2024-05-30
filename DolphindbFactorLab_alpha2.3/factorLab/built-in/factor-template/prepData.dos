@@ -1,0 +1,24 @@
+def prepData(rawData, startDate, endDate, oriName, tarName, securityidName, tradetimeName){
+    // 该计算模板准备计算因子所需的面板数据
+    // 请在使用panel_call模板前，使用该模板
+    oriname = oriName.strReplace(" ","")
+    tarname = tarName.strReplace(" ","")
+    
+    // 将原始数据中的对应列选出
+    ori = oriname.split(",")
+    tar = tarname.split(",")
+    // 创建新的表
+    namesMain = dict(STRING,STRING)
+    lth = sum(isNull(int(ori))) + 2
+    for (i in 0:lth){
+        if (ori[i] != NULL) namesMain[tar[i]] = ori[i]
+    }
+
+    colsMain = sqlColAlias(sqlCol(namesMain.values()), namesMain.keys()).append!(sqlCol(securityidName)).append!(sqlCol(tradetimeName))
+    whereCondition = expr(startDate, <=, sqlCol(tradetimeName), <=, endDate)
+    data = sql(
+        select=colsMain,
+        from=rawData,
+        where=whereCondition)
+    return data.eval()
+}

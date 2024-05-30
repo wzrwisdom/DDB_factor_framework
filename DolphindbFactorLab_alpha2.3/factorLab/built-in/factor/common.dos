@@ -1,0 +1,25 @@
+module common
+
+/* 股票价格移动加权差分因子 */
+
+def sum_diff(x, y){
+    return (x-y)\(x+y)
+}
+
+
+@state
+def factorDoubleEMA(price){
+    ema_2 = ema(price, 2)
+    ema_4 = ema(price, 4)
+    sum_diff_1000 = 1000 * sum_diff(ema_2, ema_4)
+    return ema(sum_diff_1000, 2) - ema(sum_diff_1000, 3)
+}
+
+
+
+/* 日内收益率偏度 */
+
+
+defg dayReturnSkew(close){
+	return skew(ratios(close))	
+}

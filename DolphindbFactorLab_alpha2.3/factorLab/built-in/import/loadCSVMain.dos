@@ -1,0 +1,21 @@
+def loadCSVMain(dbName, tbName, path){
+    //该数据模板仅适用于较小数据量的CSV文件数据
+    user = getCurrentSessionAndUser()[1]
+
+    // 创建dbHandle
+    db = database(directory = dbName, partitionType = VALUE, partitionScheme=2020.01M..2023.12M);
+
+    // 获取文件Schema
+    schemas = extractTextSchema(path);
+
+    // 读取文件数据
+    t = loadText(path)
+
+    //创建维度表
+    tb = db.createTable(table=t, tableName=tbName)
+
+    jobId = user + "_data_import_" + string(now()).strReplace(":", "").strReplace(".", "")
+    
+    jobId = submitJob(jobId, "", append!, tb, t)
+    return jobId
+}

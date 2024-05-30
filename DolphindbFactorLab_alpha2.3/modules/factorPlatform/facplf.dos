@@ -1,0 +1,45 @@
+module factorPlatform::facplf
+
+// 用户登录
+// 功能：账号密码登录
+// 若首次登陆则进行用户初始化
+
+def facplf_user_login(param) {
+    login(param.username, param.password)
+    
+    // 判断是否为平台用户
+    try{
+        ret = facplf_user_login_helper(param.username)
+    }catch(ex){
+        if(ex[1] like "%No access to view facplf_user_login_helper%"){
+            throw toStdJson({code: "S093"})
+        } else if (ex[1] like "%code%"){
+            throw toStdJson(parseExpr(ex[1]).eval())
+        } else {
+            throw toStdJson({code: "S094"})
+        }
+    }
+    return ret
+}
+
+
+// 用户 Token 登录
+// 功能：使用 Token 登录
+// 验证会话使用
+
+def facplf_token_login(param) {
+    authenticateByTicket(param.token)
+    return facplf_token_login_helper()
+}
+
+
+// 是否启用因子管理平台
+def is_factor_platform_enabled(){
+    return true
+}
+
+
+// 最新版本
+def facplf_get_version() {
+    return "Alpha2.3"
+}

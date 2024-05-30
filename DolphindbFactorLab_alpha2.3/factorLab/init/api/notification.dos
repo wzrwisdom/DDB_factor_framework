@@ -1,0 +1,62 @@
+/////////////////////////
+//////////消息通知////////
+/////////////////////////
+//消息列表通知
+def facplf_get_message_list(){
+    user = getCurrentSessionAndUser()[1]
+    message_info = loadTable("dfs://plf_message_info", "message_info")
+
+    msg = select * from message_info where receiver = user context by messageId limit -1
+    msg = select * from msg where isRead = false order by sendTime desc
+
+    res = array(ANY)
+    for(i in msg){
+        item = dict(STRING, ANY)
+        item["message_id"] = i.messageId
+        item["message_type"] = i.msgType
+        item["sender"]= i.sender
+        item["receiver"] = i.receiver
+        item["create_time"] = i.sendTime
+
+        data = dict(STRING, ANY)
+        if(i.rvType == "factor"){
+            review_info = loadTable("dfs://factor_review_info", "review_info");
+            name = exec factorName from review_info where reviewId = i.reviewId context by factorName limit -1;
+        }else if(i.rvType == "template"){
+            review_info = loadTable("dfs://temp_review_info", "review_info");
+            name = exec tempName from review_info where reviewId = i.reviewId context by tempName limit -1;}
+
+        data["name"] = name[0]
+        data["type"] = i.rvType
+        data["review_id"] = i.reviewId
+
+        item["data"] = data
+        res.append!(item)
+    }
+    return res
+}
+
+//标记单个消息为已读
+def facplf_read_message(param){
+    message_info = loadTable("dfs://plf_message_info", "message_info")
+
+    msg = select * from message_info where messageId = uuid(param.message_id) context by messageId limit -1
+    msg = select * from msg where isRead = false
+    if(msg.count()==0){throw toStdJson({ code: 'S031', message: '已读该条消息' })}
+
+    update msg set isRead = true
+    message_info.append!(msg)
+}
+
+//标记所有消息为已读
+def facplf_read_all_messages(){
+    user = getCurrentSessionAndUser()[1]
+    message_info = loadTable("dfs://plf_message_info", "message_info")
+
+    msg = select * from message_info where receiver = user context by messageId limit -1
+    msg = select * from msg where isRead = false
+    if(msg.count()==0){throw toStdJson({ code: 'S032', message: '无已读消息' })}
+
+    update msg set isRead = true
+    message_info.append!(msg)
+}

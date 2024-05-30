@@ -1,0 +1,101 @@
+module snapshot
+
+
+
+/* 时间加权订单斜率，订单斜率因子衡量订单价差对订单量差的敏感度。 */
+
+
+@state
+def timeWeightedOrderSlope(bid,bidQty,ask,askQty,lag=20){
+	return (log(iif(ask==0,bid,ask))-log(iif(bid==0,ask,bid)))\(log(askQty)-log(bidQty)).ffill().mavg(lag, 1).nullFill(0)
+}
+
+/* 加权平均订单失衡率因子，订单失衡率（SOIR）因子衡量买卖委托量在总量中的不均衡程度。 */
+
+
+@state
+def wavgSOIR(bidQty,askQty,lag=20){
+	imbalance= rowWavg((bidQty - askQty)\(bidQty + askQty), 10 9 8 7 6 5 4 3 2 1).ffill().nullFill(0)
+	mean = mavg(prev(imbalance), (lag-1), 2)
+	std = mstdp(prev(imbalance) * 1000000, (lag-1), 2) \ 1000000
+	return iif(std >= 0.0000001,(imbalance - mean) \ std, NULL).ffill().nullFill(0)
+}
+
+
+/* 成交价加权净委买比例，净委买比率是衡量一段时间内买盘相对强度的指标。 */
+
+@state
+def traPriceWeightedNetBuyQuoteVolumeRatio(bid,bidQty,ask,askQty,TotalValTrd,TotalVolTrd,lag=20){
+	prevbid = prev(bid)
+	prevbidQty = prev(bidQty)
+	prevask = prev(ask)
+	prevaskQty = prev(askQty)
+	bidchg = iif(round(bid-prevbid,2)>0, bidQty, iif(round(bid-prevbid,2)<0, -prevbidQty, bidQty-prevbidQty))
+	offerchg = iif(iif(ask==0,iif(prevask>0,1,0), ask-prevask)>0, prevaskQty, iif(iif(prevask==0,
+		iif(ask>0,-1,0), iif(ask>0,ask-prevask,1))<0, askQty, askQty-prevaskQty))
+	avgprice = deltas(TotalValTrd)\deltas(TotalVolTrd)
+	factorValue = (bidchg-offerchg)\(abs(bidchg)+abs(offerchg))*avgprice
+	return nullFill(msum(factorValue,lag,1)\msum(avgprice,lag,1), 0)
+}
+
+
+/* 十档净委买增额，十档净委买增额因子指的是在有效十档范围内买方资金总体增加量，即所有买价变化量的总和。 */
+
+@state
+def level10_Diff(price, qty, buy, lag=20){
+        prevPrice = price.prev()
+        left, right = rowAlign(price, prevPrice, how=iif(buy, "bid", "ask"))
+        qtyDiff = (qty.rowAt(left).nullFill(0) - qty.prev().rowAt(right).nullFill(0)) 
+        amtDiff = rowSum(nullFill(price.rowAt(left), prevPrice.rowAt(right)) * qtyDiff)
+        return msum(amtDiff, lag, 1).nullFill(0)
+}
+
+
+/* 十档买卖委托均价线性回归斜率，十档买卖委托均价即为十档买卖委托额之和除以十档买卖委托量之和。 */
+
+
+@state
+def level10_InferPriceTrend(bid, ask, bidQty, askQty, lag1=60, lag2=20){
+	inferPrice = (rowSum(bid*bidQty)+rowSum(ask*askQty))\(rowSum(bidQty)+rowSum(askQty))
+	price = iif(bid[0] <=0 or ask[0]<=0, NULL, inferPrice)
+	return price.ffill().linearTimeTrend(lag1).at(1).nullFill(0).mavg(lag2, 1).nullFill(0)
+}
+
+
+
+/* 流动性因子 */
+
+@state
+def flow(buy_vol, sell_vol, askPrice1, bidPrice1){
+        buy_vol_ma = round(mavg(buy_vol, 5*60), 5)
+        sell_vol_ma = round(mavg(sell_vol, 5*60), 5)
+        buy_prop = iif(abs(buy_vol_ma+sell_vol_ma) < 0, 0.5 , buy_vol_ma/ (buy_vol_ma+sell_vol_ma))
+        spd = askPrice1 - bidPrice1
+        spd = iif(spd < 0, 0, spd)
+        spd_ma = round(mavg(spd, 5*60), 5)
+        return iif(spd_ma == 0, 0, buy_prop / spd_ma)
+}
+
+
+
+/* 多档报价权重偏度因子 */
+
+def mathWghtCovar(x, y, w){
+	v = (x - rowWavg(x, w)) * (y - rowWavg(y, w))
+	return rowWavg(v, w)
+}
+
+@state
+def mathWghtSkew(x, w){
+	x_var = mathWghtCovar(x, x, w)
+	x_std = sqrt(x_var)
+	x_1 = x - rowWavg(x, w)
+	x_2 = x_1*x_1
+	len = size(w)
+	adj = sqrt((len - 1) * len) \ (len - 2)
+	skew = rowWsum(x_2, x_1) \ (x_var * x_std) * adj \ len
+	return iif(x_std==0, 0, skew)
+}
+
+
+

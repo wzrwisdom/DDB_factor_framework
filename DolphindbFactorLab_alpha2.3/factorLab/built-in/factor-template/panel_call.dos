@@ -1,0 +1,39 @@
+def panel_call(rawdata, startDate, endDate, factorName, securityidName, tradetimeName){
+    // 该计算模板利用标准面板数据计算因子
+    // 如数据列名与因子代码中参数名不同，请在使用本模板前，使用prepData计算模板映射
+
+    // 找出因子函数所需参数
+    syntax = facplf_find_func_params(factorName)
+
+    // 数据准备
+    selection = each(sqlCol, syntax).append!(sqlCol(tradetimeName)).append!(sqlCol(securityidName))
+    whereCondition = expr(startDate, <=, sqlCol(tradetimeName), <=, endDate)
+    data = sql(
+        select = selection,
+        from = rawdata, 
+        where = whereCondition
+    ).eval()
+    
+    //转置为面板数据
+    panels = dict(syntax, panel(data[tradetimeName], data[securityidName], data[syntax]))
+    
+    //将数据入参
+    args = array(ANY)
+    for(syt in syntax){
+        args.append!(panels[syt])
+    }
+
+    res = makeUnifiedCall(funcByName(factorName), args).eval()
+    
+    // 转为窄表存储
+    colNum = size(res.columnNames())
+    rowNum = size(res.rowNames())
+    result = table(
+                    take(res.rowNames(), rowNum*colNum) as `tradetime, 
+                    stretch(res.columnNames(), rowNum*colNum) as `securityid,
+                    take(factorName, rowNum*colNum) as `factorname,
+                    res.flatten() as `value
+                    )
+    return result
+    
+}

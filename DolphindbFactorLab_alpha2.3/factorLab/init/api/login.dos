@@ -1,0 +1,50 @@
+// 用户登录
+def facplf_user_login_helper(name) {
+    // 看是否在平台内
+    all_users = facplf_get_mgmt_users()
+    users = exec username from all_users
+
+    if (!(name in users)) {
+        logout(name)
+        throw toStdJson({code: "S004"})
+    }
+
+    try{user = facplf_get_my_info()}catch(ex){throw toStdJson({code: "S082"})}
+
+    token = rpc(getControllerAlias(), getAuthenticatedUserTicket)
+
+    // admin更新token
+    if (name == 'admin'){
+        tmp = select * from all_users where username = "admin"
+        if (token != tmp.tokenId) {
+            tmp["tokenId"] = token
+            user_tb = loadTable("dfs://mgmt_user_info", "user_info")
+            user_tb.append!(tmp)
+        }       
+    }
+
+    res = dict(STRING, ANY)
+    res["user"] = user
+    res["token"] = token
+    return res
+}
+
+
+
+// Token登录
+def facplf_token_login_helper() {
+    user = getCurrentSessionAndUser()[1]
+    users = exec username from facplf_get_mgmt_users()
+
+    if (user in users){
+        return facplf_get_my_info()
+    }else{
+        throw toStdJson({code: "S004"})
+    }
+}
+
+
+// 登出
+def facplf_logout(param) {
+    logout(param.username)
+}

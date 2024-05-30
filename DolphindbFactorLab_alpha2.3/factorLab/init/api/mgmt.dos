@@ -1,0 +1,1146 @@
+//////////////////////
+////////用户管理//////
+/////////////////////
+
+// 激活用户
+def facplf_activate_user(param){
+    user_info = loadTable("dfs://mgmt_user_info", "user_info")
+    user = getAuthenticatedUsers()[1]
+    //判断Admin
+    if (!(getCurrentSessionAndUser()[1] == "admin")) {throw toStdJson({ code: 'S001', message: '不具备该权限' })}
+
+    // 检查用户是否存在
+    all_users = rpc(getControllerAlias(), getUserList)
+    if (!(param.username in all_users)) {
+        throw toStdJson({ code: 'S004'})
+    }
+
+    //加platform_access权限
+    addGroupMember(param.username, "platform_access")
+
+    facplf_users = select * from facplf_get_mgmt_users() where username = param.username order by activateTime desc limit 1
+    //两种情况：用户是否存在我们的user_info中
+        if (size(facplf_users) != 0){
+            //存在
+            //检查用户是否激活
+            if((exec isActivated from facplf_users)[0] == true){
+                throw toStdJson({ code: 'S003' })
+            }
+            update facplf_users set isActivated = true, activateTime = now()
+            activate = exec * from facplf_users where username in param.username
+            append!(user_info, activate)
+        }else{
+            //不存在user_info
+                // 激活用户
+                tmp = table(param.username as `username,'' as tokenId, false as isImporter,false as isReviewer,now() as `activateTime,true as isActivated,false as isDeleted)
+                user_info.append!(tmp)
+        }
+
+}
+
+
+// 批量激活用户
+def facplf_activate_multi(param){
+    if (!(getCurrentSessionAndUser()[1] == "admin")) {
+        throw toStdJson({ code: 'S001', message: '不具备该权限' })}
+    
+    //检查参数
+    all_users = rpc(getControllerAlias(), getUserList)
+    unexisted = param.username[!(param.username in all_users)]
+    if (count(unexisted) != 0) {
+        throw toStdJson(dict(`code`variables, ["S074",concat(unexisted, ", ")]))
+    }
+
+    for (user in param.username){
+        user_dict = dict(["username"], [user])
+        facplf_activate_user(user_dict)
+    }
+}
+
+
+// 禁用用户
+def facplf_deactivate_user(param){
+        //判断Admin
+        if (!(getCurrentSessionAndUser()[1] == "admin")) {
+            throw toStdJson({ code: 'S001', message: '不具备该权限' })
+        }
+
+        // 获取用户数据
+        all_users = facplf_get_mgmt_users()
+
+        // 禁用用户
+        update all_users set isActivated = false where username in param.username
+        deactivated = exec * from all_users where username in param.username
+        append!(loadTable("dfs://mgmt_user_info", "user_info"), deactivated)
+
+        // 删除platform_access权限
+        deleteGroupMember(param.username, "platform_access")
+}
+
+
+// 修改密码
+def facplf_changePwd(param){
+    user = getCurrentSessionAndUser()[1]
+    try{
+        changePwd(param.old_password, param.new_password)
+    }catch(ex){
+        throw toStdJson({code: 'S080'})
+    }
+    // 修改后用户退出登录
+    logout(user)
+
+}
+
+
+// 重置密码
+def facplf_resetPwd(param){
+    //判断Admin
+    if (!(getCurrentSessionAndUser()[1] == "admin")) {
+        throw toStdJson({code: 'S001'})
+    }
+
+    resetPwd(param.username, param.new_password)
+    // 修改后用户退出登录
+    logout(param.username)
+    closeSessions(exec sessionId from getSessionMemoryStat() where userId = param.username)
+}
+
+
+//删除用户相关信息
+def facplf_del_user_all(dbpath, tbpath, user,contextCol){
+    tb = loadTable(dbpath, tbpath)
+    whereCondition1 = <username = user>
+    users = sql(select=sqlCol("*"), from=tb, where=whereCondition1, groupBy=sqlCol(contextCol), groupFlag=0, limit = -1).eval();
+    whereCondistion2 = <isDeleted = false>
+    users = sql(select=sqlCol("*"), from=users, where=whereCondistion2).eval()
+
+    update users set isDeleted = true
+    append!(tb, users)
+}
+
+
+//删除用户
+def facplf_del_user(param){
+        //判断Admin
+        if (!(getCurrentSessionAndUser()[1] == "admin")) {
+            throw toStdJson({ code: 'S001', message: '不具备该权限' })
+        }
+
+        if (param.username == "admin"){
+            throw toStdJson({ code: 'S035'})
+        }
+
+        // 检查用户是否存在
+        if (!(param.username in rpc(getControllerAlias(), getUserList))) {
+            throw toStdJson({ code: 'S004', message: '此用户不存在' })
+        }
+
+        // 获取用户数据
+        all_users = facplf_get_mgmt_users()
+
+        //删除用户因子、模板、预置、工作流、（策略）等
+            //因子 （草稿、审批、公开）
+            facplf_del_user_all("dfs://factor_draft_info", "draft_info", param.username, `fid)
+            delete from loadTable("dfs://factor_review_info", "review_info") where username = param.username;
+            facplf_del_user_all("dfs://factor_public_info", "public_info", param.username, `fid`deptName)
+
+            //模板（草稿、审批、公开）
+            facplf_del_user_all("dfs://temp_draft_info", "draft_info", param.username, `tempId)
+            delete from loadTable("dfs://temp_review_info", "review_info") where username = param.username;
+            facplf_del_user_all("dfs://temp_public_info", "public_info", param.username, `tempId`deptName)
+
+            //预置参数
+            facplf_del_user_all("dfs://preset_param_info", "param_info", param.username, `presetName)
+
+            //job
+            facplf_del_user_all("dfs://job_test_info", "test_info", param.username, `jobId)
+
+            //工作流
+            //cancel定时任务
+            schjob = select * from loadTable("dfs://workflow_schedule_jobs", "schedule_jobs") where username = param.username context by jobId limit -1
+            jobIds = exec jobId from schjob where isDeleted = false
+            try{each(cancelJob, jobIds)}catch(ex){}
+
+            facplf_del_user_all("dfs://workflow_job_list", "job_list", param.username, `id)
+            facplf_del_user_all("dfs://workflow_schedule_jobs", "schedule_jobs", param.username, `wid)
+            facplf_del_user_all("dfs://workflow_run_info", "run_info", param.username, `wid`workflowJobId`taskJobId)
+
+            //信息表
+            msg = loadTable("dfs://plf_message_info", "message_info")
+            msgt = select * from msg where receiver = param.username context by messageId limit -1
+            msgt = select * from msgt where isRead = false
+            update msgt set isRead = true
+            append!(msg, msgt)
+
+            //数据导入表
+            facplf_del_user_all("dfs://data_module_info", "module_info", param.username, `dlid)
+            facplf_del_user_all("dfs://data_template_info", "template_info", param.username, `dtid)
+            facplf_del_user_all("dfs://data_run_info", "run_info", param.username, `drid)
+
+            //因子评价表
+            facplf_del_user_all("dfs://analysis_library_info", "library_info", param.username, `alid)
+            facplf_del_user_all("dfs://analysis_template_info", "template_info", param.username, `atid)
+            facplf_del_user_all("dfs://analysis_run_info", "run_info", param.username, `aid)
+
+        // 更新用户信息表删除状态
+        update all_users set isDeleted = true, isActivated = false where username = param.username
+        deleted = exec * from all_users where username = param.username
+        append!(loadTable("dfs://mgmt_user_info", "user_info"), deleted)
+
+
+        // 删除部门信息表
+        delete from loadTable("dfs://mgmt_dept_info", "dept_info") where username = param.username;
+
+        // 删除用户可访问库表
+        delAccess = exec * from loadTable("dfs://mgmt_user_access", "user_access") where username = param.username
+        update delAccess set isDeleted = true
+        append!(loadTable("dfs://mgmt_user_access", "user_access"), delAccess)
+
+        // 删除用户ddb账户
+        deleteUser(param.username)
+}
+
+
+//新建用户
+def facplf_create_user(param) {
+    //判断Admin
+    if (!(getCurrentSessionAndUser()[1] == "admin")) {throw toStdJson({ code: 'S001'})}
+
+    all_users = rpc(getControllerAlias(), getUserList)
+    // 检查用户是否存在
+    if (param.username in all_users) {throw toStdJson({ code: 'S005'})}
+
+    // 限制用户名为DolphinDB
+    if (param.username == "DolphinDB"){throw toStdJson({ code: 'S005'})}
+    
+    // 检查系统权限
+    if (count(param.system_auths)!=0) {
+        if( (!(3 in param.system_auths)) and (!(4 in param.system_auths))) {
+            throw toStdJson({code: "S052"})
+        }
+    }
+    
+    // 部门赋予的权限是否正确
+    // 检查部门是否存在
+    dept_name = exec deptName from loadTable("dfs://mgmt_dept_name", "dept_name") context by deptName limit -1
+    for (i in param.departments) {
+        if (!(i.name in dept_name)) {
+            throw toStdJson({code: 'S048'})
+        }
+        if (!isVoid(i.auths)) {
+            correct_auths=`1`2`3`4$INT
+            if (!all(i.auths in correct_auths)) {
+                throw toStdJson({code: "S052"})
+            }
+        }
+    }
+    
+    //部门与数据库匹配检查: 检查数据库名是否以部门名开头
+    // for (i in param.departments){//i = param.departments[0]
+    //     deptname = i.name
+    //     for(j in i.access_tables){//j = i.access_tables[0]
+    //         if (!(isVoid(j))){
+    //             if(strpos(j.database, deptname) == -1){
+    //                 throw toStdJson(dict(`code`variables, ["S007", j.database]))}
+    //         }
+    //     }
+    // }
+    
+    //创建用户账号并加入组
+    createUser(param.username, param.password)
+    addGroupMember(param.username, `platform_access)
+
+    //赋予权限
+    try{
+        data_import = iif(3 in param.system_auths, true, false)
+        if (data_import) {
+            addGroupMember(param.username, `data_admin)
+            grant(param.username, DB_OWNER, "dfs://public_" + param.username + "_*")
+            grant("admin", DB_OWNER)
+        }
+    }catch(ex){
+        deleteUser(param.username)
+        throw toStdJson(dict(`code`variables, ["S025",ex[0]+": "+ex[1]]))
+    }
+    
+    try{
+        review = iif(4 in param.system_auths, true, false)
+        if (review) {
+            addGroupMember(param.username, `review_admin)
+        }
+    }catch(ex){
+        //回滚
+        deleteUser(param.username)
+        throw toStdJson(dict(`code`variables, ["S025",ex[0]+": "+ex[1]]))
+    }
+
+    //更新用户表
+    try{
+        user_table = loadTable("dfs://mgmt_user_info", "user_info")
+        user_table.tableInsert(
+            table(
+                param.username as `username,
+                '' as tokenId,
+                data_import as isImporter,
+                review as isReviewer,
+                now() as `activateTime,
+                true as isActivated,
+                false as isDeleted)
+        )
+    }catch(ex){
+        //回滚
+        deleteUser(param.username)
+        throw toStdJson(dict(`code`variables, ["S025",ex[0]+": "+ex[1]]))
+    }
+
+    //内置工作流+任务
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    builtin = select * from job_list where username = "DolphinDB" and jobName in ["因子计算任务参考", "工作流参考"] context by jobName limit -1
+    update builtin set id = rand(uuid(),2), username = take(param.username, 2) , updateTime = take(now(), 2)
+    job_list.append!(builtin)
+
+    // departments
+    dept_table = loadTable("dfs://mgmt_dept_info", "dept_info")
+    user_access = loadTable("dfs://mgmt_user_access", "user_access")
+    try{
+        for (i in param.departments){
+            isDeptFacEditor = iif(1 in i.auths, true, false)
+            isDeptStrategist = iif(2 in i.auths, true, false)
+            isDeptImporter = iif(3 in i.auths, true, false)
+            isDeptReviewer = iif(4 in i.auths, true, false)
+
+            //赋予Group
+            groupname = "facplf_" + i.name
+            addGroupMember(param.username, groupname)
+            if (isDeptFacEditor) {addGroupMember(param.username, `mgmt_factor)}
+            if (isDeptStrategist) {addGroupMember(param.username, `mgmt_strategy)}
+            if (isDeptImporter) {
+                addGroupMember(param.username, `mgmt_data)}
+                dbName = "dfs://" + i.name + "_" + param.username + "_*"
+                grant(param.username, DB_OWNER, dbName)
+                grant("admin", DB_OWNER)
+            if (isDeptReviewer) {addGroupMember(param.username, `mgmt_review)}
+
+
+            dept_table.tableInsert(
+            table(
+                i.name as `deptName,
+                param.username as `username,
+                false as `isDeptAdmin,
+                isDeptReviewer as `isDeptReviewer,
+                isDeptFacEditor as `isDeptFacEditor,
+                isDeptImporter as `isDeptImporter,
+                isDeptStrategist as `isDeptStrategist)
+            )
+
+            if (size(i.access_tables[0]) == 2){
+            for (j in i.access_tables){
+
+                //赋权
+                tableAccess = j.database + "/" + j.table
+                grant(param.username, TABLE_READ, tableAccess)
+
+                //加入用户可访问库表表
+                user_access.tableInsert(
+                    table(
+                        param.username as `username,
+                        i.name as `deptName,
+                        j.database as `dbName,
+                        j.table as `tableName,
+                        false as `isDeleted)
+                        )
+                }
+            }
+        }
+    }catch(ex){
+        //回滚
+        deleteUser(param.username)
+        try{delete from user_table where username = param.username;}catch(ex){}
+        try{delete from job_list where username = param.username;}catch(ex){}
+        try{delete from dept_table where username = param.username;}catch(ex){}
+        try{delete from user_access where username = param.username;}catch(ex){}
+        throw toStdJson(dict(`code`variables, ["S025",ex[0]+": "+ex[1]]))
+    }
+}
+
+
+//【用户】查询个人的用户信息
+def facplf_get_my_info(){
+    user = getCurrentSessionAndUser()[1]
+    all_users = select * from facplf_get_mgmt_users() where isActivated = true
+    user_info = select * from all_users where username = user
+    if(count(user_info)==0){throw toStdJson({ code: 'S002'})}
+
+    user_list = exec username from all_users 
+    dept_tb = select * from loadTable("dfs://mgmt_dept_info", "dept_info") where username in user_list and isDuplicated([username, deptName], LAST) = false;
+    dept_info = select * from dept_tb where username = user
+
+    // 找每个部门信息
+    departments = array(ANY)
+    distinct_dept = exec distinct(deptName) from dept_info;
+    for (dept in distinct_dept) {//dept = distinct_dept[0]
+        dept_tmp = select * from dept_info where deptName = dept
+        department = dict(STRING, ANY)
+        dept_nickname = (exec last(nickname) from loadTable("dfs://mgmt_dept_name", "dept_name") where deptName = dept)
+        department["nickname"] = dept_nickname
+        department["name"] = dept
+        department["is_admin"] = dept_tmp.isDeptAdmin[0]
+        auths = array(int)
+        if (dept_tmp.isDeptReviewer == true) { auths. append!(4) }
+        if (dept_tmp.isDeptFacEditor == true) {auths.append!(1)}
+        if (dept_tmp.isDeptImporter == true) {auths.append!(3)}
+        if (dept_tmp.isDeptStrategist == true) {auths.append!(2)}
+        department["auths"] = auths
+
+        access_tbs = select * from loadTable("dfs://mgmt_user_access","user_access") where deptName = dept and username=user;
+        access_tbs = select * from access_tbs where isDuplicated([username,dbName,tableName],LAST)=false;
+        access_tbs = select dbName as database, tableName as table from access_tbs where isDeleted = false;
+        department["access_tables"] =  access_tbs
+        departments.append!(department)
+    }
+    res = dict(STRING, ANY)
+    res["username"] = user
+    res["active_time"] = user_info.activateTime[0]
+    auths = array(int)
+    if (user_info.isImporter == true) { auths. append!(3) }
+    if (user_info.isReviewer == true) {auths.append!(4)}
+    res["system_auths"] = auths
+    res["is_admin"] = iif(user=='admin',true, false)
+    res["is_active"] = user_info.isActivated[0]
+    res["departments"] = departments
+    return res
+}
+
+
+// 获取用户详情
+def facplf_get_user_detail(param) {
+    user = getCurrentSessionAndUser()[1]
+    if (user == 'admin') {
+        return facplf_get_all_user_info(param.username)
+    } else if (`dept_admin in rpc(getControllerAlias(), getUserAccess).groups.split(",").flatten()) {
+        return facplf_get_my_dept_info(param.username)
+    } else {
+        throw toStdJson({ code: 'S001'})
+    }
+}
+
+//检查并更新用户权限
+def facplf_check_user_access(user){
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+
+    dept_auths = select username, max(isDeptReviewer) as isDeptReviewer, max(isDeptAdmin) as isDeptAdmin, max(isDeptFacEditor) as isDeptFacEditor, max(isDeptImporter) as isDeptImporter,max(isDeptStrategist) as isDeptStrategist from dept_info where username == user group by username;
+
+    if(count(dept_auths) == 0){return NULL}
+
+    // 部门admin权限
+    try{
+        deleteGroupMember(user, 'dept_admin')
+    }catch(ex){}
+    if (dept_auths.isDeptAdmin==true) {
+        addGroupMember(user, 'dept_admin')
+    }
+
+    // 数据导入权限
+    try{deleteGroupMember(user, 'mgmt_data')}catch(ex){}
+    if (dept_auths.isDeptImporter==true) {
+        addGroupMember(user, 'mgmt_data')
+    }
+    // 因子编辑权限
+    try{
+        deleteGroupMember(user, 'mgmt_factor')
+    }catch(ex){}
+    if (dept_auths.isDeptFacEditor==true) {
+        addGroupMember(user, 'mgmt_factor')
+    }
+    // 策略权限
+    try{
+        deleteGroupMember(user, 'mgmt_strategy')
+    }catch(ex){}
+    if (dept_auths.isDeptStrategist==true) {
+        addGroupMember(user, 'mgmt_strategy')
+    }
+    // 审核员权限
+    try{
+        deleteGroupMember(user, 'mgmt_review')
+    }catch(ex){}
+    if (dept_auths.isDeptReviewer==true) {
+        addGroupMember(user, 'mgmt_review')
+    }
+
+}
+
+// 修改用户信息
+def facplf_edit_user(param) {
+    user = getCurrentSessionAndUser()[1]
+    dept_tb = loadTable("dfs://mgmt_dept_info", "dept_info")
+    user_tb = loadTable("dfs://mgmt_user_info", "user_info")
+    access_tb = loadTable("dfs://mgmt_user_access", "user_access")
+    
+    //参数检查
+    //系统权限参数检查
+    if (!isVoid(param.system_auths["add_auths"])){
+        if (all(param.system_auths["add_auths"] in [3,4])) {
+            throw toStdJson({code: "S052"})
+        }
+    }
+    if (any(param.add_auths in param.delete_auths)) {
+        throw toStdJson({code: "S063"})
+    }
+    
+    // 部门输入参数检查
+    // 获取用户所在的部门
+    user_departments = select * from dept_tb where username = param.username context by deptName limit -1;
+    my_dept_list = exec deptName from user_departments
+    all_dept_list = exec distinct(deptName) from dept_tb
+
+    add_depts = param.departments.added
+    removed_depts = param.departments.removed
+    revise_depts = param.departments.revised
+
+    if (!isVoid(param.departments)) {
+        if (!isVoid(add_depts)){
+            for (dept in add_depts) {//dept = add_depts[0]
+                // 检查名称
+                if (dept.name in my_dept_list){
+                    throw toStdJson({code: 'S067'})
+                }
+                if (!(dept.name in all_dept_list)){
+                    throw toStdJson({code: 'S061'})
+                }
+                // 检查权限在1,2,3,4
+                if (!isVoid(dept.auths)){
+                    if (!all(dept.auths in [1,2,3,4])){
+                        throw toStdJson({code: 'S064'})
+                    }
+                }
+                // 检查access_tbs
+                // dept_access = exec distinct dbName, tableName from access_tb where deptName = dept.name;
+                // if (!isVoid(dept.access_tables)){
+                //     for (tb in dept.access_tables) {// tb = dept.access_tables[0]
+                //         tmp = select * from dept_access where dbName = tb.database and tableName = tb.table
+                //         if (size(tmp) == 0){
+                //             throw toStdJson({code: "S068"})
+                //         }
+                //     }
+                // }
+            }
+        }
+        if (!isVoid(removed_depts)) {
+            for (dept in removed_depts) {//dept = removed_depts[0]
+                if (!(dept["name"] in my_dept_list)) {throw toStdJson({code: 'S066'})}
+                //必须保留至少一个管理员
+                dept_info = select * from dept_tb where deptName = dept["name"] context by deptName, username limit -1
+                manager_cnt = exec count(username) from dept_info where isDeptAdmin = true
+                isDeptAdmin = exec isDeptAdmin from dept_info where username = param.username
+                if((manager_cnt == 1) && (isDeptAdmin)) {
+                    throw toStdJson(dict(`code`variables, ["S095", dept["name"]]))
+                }
+            }
+        }
+        if (!isVoid(revise_depts)) {
+            for (dept in revise_depts) {
+                // 检查名称
+                if (!(dept.name in my_dept_list)){
+                    throw toStdJson({code: 'S066'})
+                }
+                // 检查权限
+                if (!isVoid(dept.auths)){
+                    if (any(dept.auths.add_auths in dept.auths.delete_auths)){
+                        throw toStdJson({code: "S064"})
+                    }
+                    if (!all(join(dept.auths.add_auths,dept.auths.delete_auths) in [1,2,3,4])) {
+                        throw toStdJson({code: 'S064'})
+                    }
+                    old_auths = last(exec isDeptFacEditor, isDeptStrategist, isDeptImporter, isDeptReviewer from dept_tb where deptName = dept.name and username = param.username)
+                    tmp_auths = []
+                    if(old_auths.isDeptFacEditor[0]==true){tmp_auths.append!(1)}
+                    if(old_auths.isDeptStrategist[0]==true){tmp_auths.append!(2)}
+                    if(old_auths.isDeptImporter[0]==true){tmp_auths.append!(3)}
+                    if(old_auths.isDeptReviewer[0]==true){tmp_auths.append!(4)}
+                    if (!isVoid(dept.auths.add_auths)) {
+                        if (all(dept.auths.add_auths in tmp_auths)) {
+                            throw toStdJson({code: 'S065'})
+                        }
+                    }
+                    if (!all(dept.auths.delete_auths in tmp_auths)) {
+                        throw toStdJson({code: 'S064'})
+                    }
+                }
+                // 检查表格
+                if (!isVoid(dept.access_tables)){
+                    dept_access = exec distinct dbName, tableName from access_tb where deptName = dept.name;
+                    old_access = exec * from access_tb where deptName = dept.name and username = param.username context by dbName, tableName limit -1;
+                    old_access = exec dbName, tableName from old_access where isDeleted = false;
+                    if (!isVoid(dept.access_tables.add_tables) and !isVoid(dept.access_tables.delete_tables)) {
+                        if (any(dept.access_tables.add_tables in dept.access_tables.delete_tables)) {
+                            throw toStdJson({code: "S069"})
+                        }    
+                    }
+
+                    if (!isVoid(dept.access_tables.add_tables)){
+                        for (tb in dept.access_tables.add_tables) {
+                            tmp = select * from dept_access where dbName = tb.database and tableName = tb.table
+                            my_db = select * from old_access where dbName = tb.database and tableName = tb.table 
+                            if (size(tmp) == 0){
+                                throw toStdJson({code: "S068"})
+                            }
+                            if (size(my_db) != 0){
+                                throw toStdJson({code: "S070"})
+                            }
+                        }
+                    }
+                    if (!isVoid(dept.access_tables.delete_tables)){
+                        for (tb in dept.access_tables.add_tables) {
+                            my_db = select * from old_access where dbName = tb.database and tableName = tb.table 
+                            if (size(my_db) == 0){
+                                throw toStdJson({code: "S071"})
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 修改开始
+    // 修改系统权限
+    if(!isVoid(param.system_auths)){
+        removed_auths = param.system_auths.removed
+        add_auths = param.system_auths.added
+
+        // 系统权限收回
+        // 数据权限收回
+        if (3 in removed_auths) {
+            deleteGroupMember(param.username, `data_admin)
+            revoke(param.username, DB_OWNER,"dfs://public_"+ param.username + "_*")
+            grant("admin", DB_OWNER)
+        }
+        // 审核权限收回
+        if (4 in removed_auths) {
+            deleteGroupMember(param.username, `review_admin)
+        }
+        // 系统权限增加
+        // 数据权限增加
+        if (3 in add_auths) {
+            addGroupMember(param.username, `data_admin)
+            grant(param.username, DB_OWNER, "dfs://public_"+ param.username + "_*")
+            grant("admin", DB_OWNER)
+        }
+        // 审核权限增加
+        if (4 in add_auths) {
+            addGroupMember(param.username, `review_admin)
+        }
+
+        // 系统权限查询
+        auths = rpc(getControllerAlias(), getGroupsByUserId, param.username)
+        isImporter = iif("data_admin" in auths, true, false)
+        isReviewer = iif("review_admin" in auths, true, false)
+
+        // 取出上一条记录
+        user_info = last(exec * from user_tb where username = param.username)
+        user_info["isImporter"] = isImporter
+        user_info["isReviewer"] = isReviewer
+        user_tb.tableInsert(user_info)
+    }
+
+    // 修改部门信息
+    // 部门admin：登录admin完成修改
+    if (user != "admin"){
+        my_token = rpc(getControllerAlias(), getAuthenticatedUserTicket)
+        admin_token = last(exec tokenId from user_tb where username = 'admin')
+        try{
+            authenticateByTicket(admin_token)
+        }catch(ex){
+            authenticateByTicket(my_token)
+            throw toStdJson({code:'S081'})
+        }
+    }
+
+    // 删除部门
+    if (!isVoid(removed_depts)) {
+        for (dept in removed_depts) {
+            deleteGroupMember(param.username, "facplf_"+dept.name)
+            // 删除部门数据权限
+            if (3 in dept.auths) {
+                dbname = "dfs://" + dept.name + "_" + param.username + "_*"
+                revoke(param.username, DB_OWNER, dbname)
+                grant("admin", DB_OWNER)
+            }
+            // 删除库表的阅读权限
+            if (!isVoid(dept.access_tables)) {
+                for (tb in dept.access_tables){
+                    // tb = dept.access_tables[0]
+                    // tbname = "dfs://"+ tb.database + "/"+tb.table
+                    tbname = tb.database + "/"+tb.table
+                    revoke(param.username, TABLE_READ, tbname)
+                    // 更新可访问表记录
+                    access_tb.tableInsert(table(param.username as `username, dept.name as deptName, tb.database as dbName, tb.table as tableName, true as isDeleted))
+                }
+            }
+            // 更新部门记录表
+            delete from dept_tb where username = param.username and deptName = dept.name;
+        }
+    }
+
+    // 增加部门
+    if (!isVoid(add_depts)) {
+        for (dept in add_depts) {//dept = add_depts[0]
+            addGroupMember(param.username, "facplf_"+ dept.name)
+            isDeptFacEditor=iif(1 in dept.auths, true, false)
+            isDeptStrategist=iif(2 in dept.auths, true, false)
+            isDeptImporter=iif(3 in dept.auths, true, false)
+            isDeptReviewer=iif(4 in dept.auths, true, false)
+
+            if (isDeptFacEditor) {addGroupMember(param.username, `mgmt_factor)}
+            if (isDeptStrategist) {addGroupMember(param.username, `mgmt_strategy)}
+            if (isDeptImporter) {
+                addGroupMember(param.username, `mgmt_data)
+                dbname = "dfs://" + dept.name + "_" + param.username + "_*"
+                grant(param.username, DB_OWNER, dbname)
+                grant("admin", DB_OWNER)
+            }
+            if (isDeptReviewer) {addGroupMember(param.username, `mgmt_review)}
+
+            dept_tb.tableInsert(
+                table(dept.name as deptName, param.username as username, false as isDeptAdmin, isDeptReviewer as isDeptReviewer, isDeptFacEditor as isDeptFacEditor, isDeptImporter as isDeptImporter, isDeptStrategist as isDeptStrategist))
+
+            // 表格赋权
+            if (!isVoid(dept.access_tables)) {
+                for (tb in dept.access_tables) {
+                    // tbname = "dfs://"+ tb.database + "/"+tb.table
+                    tbname = tb.database + "/"+tb.table
+                    grant(param.username, TABLE_READ, tbname)
+                    access_tb.tableInsert(table(param.username as `username, dept.name as deptName, tb.database as dbName, tb.table as tableName, false as isDeleted))
+                }
+            }
+        }
+    }
+
+    // 修改部门
+    if (!isVoid(revise_depts)) {
+        for (dept in revise_depts) {//dept = revise_depts[0]
+            // 权限修改
+            user_info = last(exec * from dept_tb where deptName = dept.name and username = param.username)
+
+            // 数据权限收回
+            if (3 in dept.auth.removed) {
+                dbname = "dfs://" + dept.name + "_" + param.username + "_*"
+                revoke(param.username, DB_OWNER, dbname)
+                grant("admin", DB_OWNER)
+                user_info['isDeptImporter'] = false
+            }
+            // 数据权限增加
+            if (3 in dept.auth.added) {
+                dbname = "dfs://" + dept.name + "_" + param.username + "_*"
+                // 部门admin赋权需要修改
+                grant(param.username, DB_OWNER, dbname)
+                grant("admin", DB_OWNER)
+                user_info['isDeptImporter'] = true
+                addGroupMember(param.username, 'mgmt_data')
+            }
+
+            if (1 in dept.auth.removed) {user_info['isDeptFacEditor']=false}
+            if (2 in dept.auth.removed) {user_info['isDeptStrategist']=false}
+            if (4 in dept.auth.removed) {user_info['isDeptReviewer']=false}
+
+            //因子模块权限
+            if (1 in dept.auth.added) {
+                user_info['isDeptFacEditor']=true
+                addGroupMember(param.username, 'mgmt_factor')
+            }
+
+            //策略权限（暂无）
+            if (2 in dept.auth.added) {
+                user_info['isDeptStrategist']=true
+                addGroupMember(param.username, 'mgmt_strategy')
+            }
+
+            //审核权限
+            if (4 in dept.auth.added) {
+                user_info['isDeptReviewer']=true
+                addGroupMember(param.username, 'mgmt_review')
+            }
+
+            // 更新部门表
+            delete from dept_tb where deptName = dept.name and username = param.username
+            dept_tb.append!(user_info)
+
+            // 修改数据库表权限
+            removed_tbs = dept.access_tables.removed
+            added_tbs = dept.access_tables.added
+            if (!isVoid(removed_tbs)) {
+                for (tb in removed_tbs) {
+                    tbname = tb.database+"/"+tb.table
+                    revoke(param.username, TABLE_READ, tbname)
+                    access_tb.tableInsert(
+                        table(
+                            param.username as `username, 
+                            dept.name as deptName, 
+                            tb.database as dbName, 
+                            tb.table as tableName, 
+                            true as isDeleted
+                            ))
+                }
+            }
+
+            if (!isVoid(added_tbs)) {
+                for (tb in added_tbs) {
+                    // tbname = "dfs://"+ tb.database + "/"+tb.table
+                    tbname = tb.database + "/"+tb.table
+                    grant(param.username, TABLE_READ, tbname)
+                    access_tb.tableInsert(table(param.username as `username, dept.name as deptName, tb.database as dbName, tb.table as tableName, false as isDeleted))
+                }
+            }
+        }
+    }
+
+    //检查并更新用户权限
+    facplf_check_user_access(param.username)
+}
+
+//////////////////////
+////////部门管理//////
+/////////////////////
+
+// 新建部门
+def facplf_create_dept(param) {
+    dept_tb = loadTable("dfs://mgmt_dept_info", "dept_info")
+    name_tb = loadTable("dfs://mgmt_dept_name", "dept_name")
+
+    // 参数检查
+    // 权限
+    if (!(getCurrentSessionAndUser()[1] == "admin")) {throw toStdJson({ code: 'S001'})}
+
+    // 是否有admins
+    if (count(param.admins)==0){throw toStdJson({code: 'S044'})}
+
+    // 先检查是否重名
+    all_groups = rpc(getControllerAlias(), getGroupList)
+    if (("facplf_"+param.name) in all_groups) {throw toStdJson({code: 'S011'})}
+    
+    // 检查是否admin和member里有重复用户
+    if (count(param.members)!=0){
+        if (any(param.admins in param.members)){
+            throw toStdJson({ code : "S053"})
+        }
+        all_group_members = [param.admins,param.members].flatten()
+    }else{
+        all_group_members = [param.admins].flatten()
+    }
+
+    // 是否为平台用户
+    all_users = exec username from facplf_get_mgmt_users()
+    for(i in all_group_members){//i = all_group_members[0]
+        if(!(i in all_users)){
+            throw toStdJson(dict(`code`variables, ["s074", i]))
+        }
+    }
+    
+    // 检查中文昵称
+    nickname_list = exec nickname, deptName, createTime from name_tb context by deptName limit -1
+    if (param.nickname in (exec nickname from nickname_list)){
+        throw toStdJson({code: "S010"})
+    }
+    
+    // 步骤
+    // 1: 创建小组
+    groupName = "facplf_"+param.name
+    createGroup(groupName)
+
+    // 2: 加入中文昵称
+    try{
+        name_tmp = table(param.name as `deptName, param.nickname as `nickname, now() as `createTime)
+        name_tb.append!(name_tmp)
+    }catch(ex){
+        //1
+        deleteGroup(groupName)
+        //error
+        throw toStdJson({code: "S012"})
+    }
+
+    createtime = now()
+    // 3: 普通部门用户加入
+    try{
+        if (count(param.members) > 0) {
+            for (member in param.members) {
+                addGroupMember(member, "facplf_" + param.name)
+                dept_tb.append!(
+                    table(param.name as `deptName, member as `username, false as `isDeptAdmin, false as `isDeptReviewer, false as `isDeptFacEditor, false as `isDeptData, false as `isDeptStrategyEditor))
+            }
+        }
+    }catch(ex){
+        //1
+        deleteGroup("facplf_"+param.name)
+        //2
+        delete from name_tb where deptName = param.name and nickname = param.nickname;
+        //3
+        deleteGroupMember(param.members, "facplf_" + param.name)
+        delete from dept_tb where deptName = param.name;
+        //error
+        throw toStdJson({code: 'S012'})
+    }
+
+    // 4: 管理员加入
+    //管理员权限组(部门组、部门经理组、部门数据导入组、部门审核组、部门因子开发组、部门策略开发组)
+    groups = ["facplf_"+ param.name, "dept_admin", "mgmt_data", "mgmt_review", "mgmt_factor", "mgmt_strategy"]
+    try{
+        for (deptadmin in param.admins) {
+            addGroupMember(deptadmin, groups)
+            // 数据库前缀
+            dbname = "dfs://" + param.name + "_" + deptadmin + "_*"
+            grant(deptadmin, DB_OWNER, dbname)
+            grant("admin", DB_OWNER)
+            dept_tb.append!(table(param.name as `deptName, deptadmin as `username, true as `isDeptAdmin, true as `isDeptReviewer, true as `isDeptFacEditor, true as `isDeptData, false as `isDeptStrategyEditor))
+        }
+    }catch(ex){
+        //1
+        deleteGroup("facplf_"+param.name)
+        //2
+        delete from name_tb where deptName = param.name and nickname = param.nickname;
+        //3
+        deleteGroupMember(param.members, "facplf_" + param.name)
+        //4
+        try{
+            for (deptadmin in param.admins){
+                deleteGroupMember(deptadmin, groups);
+                revoke(deptadmin, DB_OWNER, "dfs://" + param.name + "_" + deptadmin + "_*")
+                grant("admin", DB_OWNER)
+            }
+        }catch(ex){}
+        delete from dept_tb where deptName = param.name;
+        //error
+        throw toStdJson({code: 'S012'})
+    }
+}
+
+// 查询部门详情
+def facplf_get_dept_detail_helper(dept){
+    dept_tb = select * from loadTable("dfs://mgmt_dept_info", "dept_info") where deptName = dept and isDuplicated([deptName,username], LAST) = false;
+    res = dict(STRING, ANY)
+    dept_name_tb = select * from loadTable("dfs://mgmt_dept_name", "dept_name") where deptName = dept and isDuplicated([deptName], LAST) = false;
+    create_time = (exec createTime from dept_name_tb)[0]
+    nickname = (exec nickname from dept_name_tb)[0]
+    admins = exec username from dept_tb where isDeptAdmin = true;
+    members = exec username from dept_tb where isDeptAdmin = false;
+
+    tables = getClusterDFSTables()
+    ret = table("dfs://" + tables.split("/")[2] as "database", tables.split("/")[3] as "table")
+    delete from ret where database in facplf_get_all_backend_db() 
+    delete from ret where database in ["dfs://public_HIGH", "dfs://public_LOW", "dfs://public_MEDIUM"]
+
+    //access_tbs = select * from loadTable("dfs://mgmt_user_access","user_access") where deptName = dept;
+    //access_tbs = select distinct dbName as database, tableName as table from access_tbs; 
+
+
+    res["name"] = dept
+    res["nickname"] = nickname
+    res["create_time"] = create_time
+    res["admins"] = admins
+    res["members"] = members
+    res["access_tables"] = ret
+    return res
+}
+
+def facplf_get_dept_detail(param){
+    try{
+        return facplf_get_dept_detail_helper(param.name)
+    }catch(ex){
+        throw toStdJson({ code: 'S001'})
+    }
+}
+
+
+// 查询部门列表
+def facplf_get_dept_list(){
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+    dept_name = loadTable("dfs://mgmt_dept_name", "dept_name")
+    item = array(ANY)
+    dept_name_tb = select distinct deptName, createTime from dept_name order by createTime desc
+    dept_list = exec deptName from dept_name_tb
+    for (dept in dept_list) {
+        item.append!(facplf_get_dept_detail_helper(dept))
+    }
+    total = size(dept_list)
+
+    res=dict(STRING, ANY)
+    res["items"] = item
+    res["total"] = total
+    return res
+}
+
+
+//删除部门
+def facplf_del_dept(param){
+    user_access = loadTable("dfs://mgmt_user_access", "user_access")
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+    dept_name = loadTable("dfs://mgmt_dept_name", "dept_name")
+    
+    //判断Admin
+    if (!(getCurrentSessionAndUser()[1] == "admin")) {throw toStdJson({ code: 'S001'})}
+    
+    if(param.name == "facplf$public"){throw toStdJson({ code: 'S006'})}
+
+    //检查部门是否存在
+    deptInfo = select * from dept_info where deptName = param.name
+    if (count(deptInfo)==0){throw toStdJson({ code: 'S061'})}
+    
+    //删除部门信息表
+    delete from dept_info where deptName = param.name;
+
+    //删除部门名称表
+    deptName = select * from dept_name where deptName = param.name
+    delete from dept_name where deptName = param.name
+    
+    //部门组
+    groupname = "facplf_" + param.name
+    //删除部门组
+    try{deleteGroup(groupname)}catch(ex){throw toStdJson({ code: 'S043'})}
+    
+    //修改用户可访问库表表
+    deleted = select * from user_access where deptName = param.name and isDeleted = false
+    update deleted set isDeleted = true
+    user_access.append!(deleted)
+}
+
+
+// 修改部门信息
+def facplf_edit_dept(param) {
+    dept = loadTable("dfs://mgmt_dept_info", "dept_info")
+    dept_name = loadTable("dfs://mgmt_dept_name", "dept_name")
+    user_access=loadTable("dfs://mgmt_user_access","user_access")
+
+    dept_tb = select * from dept where deptName = param.name context by username limit -1;
+    
+    if (size(param.admins)!=0) {
+        admins = table(param.admins as username)
+    } else {
+        admins = table("" as username)
+    }
+    if (size(param.members)!=0) {
+        members = table(param.members as username)
+    } else {
+        members = table("" as username)
+    }
+    all_members = admins
+    all_members.append!(members)
+    all_members = select distinct(username) as username from all_members where username is not null;
+    
+    // 检查user是否存在
+    try{
+        if (!all(rpc(getControllerAlias(), getUserAccess, all_members.username).groups.like("%platform_access%"))) {
+            throw toStdJson({code : "S002"})
+        }
+    }catch(ex){
+        throw toStdJson({code : "S002"})
+    }
+    
+    
+    // 对比admin信息
+    old_admins = select * from dept_tb where isDeptAdmin=true;
+    delete_admins =  select * from old_admins o left join admins a on o.username = a.username where a.username is null;
+    new_admins = select * from admins a left join old_admins o on o.username = a.username where o.username is null;
+    
+    // 对比用户信息
+    old_members = select * from dept_tb where isDeptAdmin = false;
+    delete_members =  select * from old_members o left join members a on o.username = a.username where a.username is null;
+    new_members = exec * from members a left join old_members o on o.username = a.username where o.username is null;
+    old_all_members = select distinct(username) as username from old_members.append!(old_admins)
+
+    // 删除用户
+    delete_users = exec distinct(username) from old_all_members o left join all_members a on a.username = o.username where a.username is null;
+    for (user in delete_users) {
+        // 删除记录
+        delete from dept where username = user, deptName = param.name;
+        deleteGroupMember(user, "facplf_"+param.name)
+        // 撤销可读权限
+        access_tbs = select * from loadTable("dfs://mgmt_user_access","user_access") where deptName=param.name;
+        access_tbs = select * from access_tbs where isDuplicated([username,dbName,tableName],LAST)=false;
+        access_tbs = select dbName as database, tableName as table from access_tbs where isDeleted = false;
+        for (i in access_tbs) {
+            if(existsTable(i.database, i.table)){
+                tb = i.database + "/"+ i.table
+                revoke(user, TABLE_READ, tb)
+                revoke(user, DB_MANAGE, i.database)
+                user_access.tableInsert(table(user as username, param.name as deptName, i.database as dbName, i.table as tableName, true as isDeleted))
+            }
+        }
+        // 撤销创建库表权限
+        if (user in exec distinct(username) from old_admins) {
+            dbname = "dfs://" + param.name + "_" + user + "_*"
+            revoke(user, DB_OWNER, dbname)
+            grant("admin", DB_OWNER)
+        }
+    }
+
+    // 增加用户
+    add_users = exec distinct(username) from all_members a left join old_all_members o on a.username = o.username where o.username is null;
+    for (member in add_users) {
+        addGroupMember(member, "facplf_"+param.name)
+        dept.tableInsert(table(param.name as deptName, member as username, false as DeptAdmin, false as isDeptReviewer, false as isDeptFacEditor, false as isDeptData, false as isDeptStrategyEditor))
+    }
+
+    // 管理员->普通用户
+    admin_to_member = exec distinct(username) from old_admins o inner join members n on o.username = n.username
+    for (user in admin_to_member) {
+        // 更新表格
+        tmp = exec * from dept where deptName = param.name and username = user and isDuplicated([deptName, username], LAST) = false;
+        dept.tableInsert(table(param.name as deptName, user as username, false as DeptAdmin, false as isDeptReviewer, true as isDeptFacEditor, false as isDeptData, false as isDeptStrategyEditor))
+
+        // 删除权限
+        admin_auth = exec isDeptAdmin from dept where username = user and isDuplicated([deptName, username], LAST) = false;
+        dbname = "dfs://" + param.name + "_" + user + "_*"
+        revoke(user, DB_OWNER, dbname)
+        grant("admin", DB_OWNER)
+        if (!(true in admin_auth)){
+            deleteGroupMember(user, "dept_admin")
+        }
+    }
+
+    // 普通用户->admin
+    memeber_to_admins = exec distinct(username) from new_admins
+    for (user in memeber_to_admins) {
+        addGroupMember(user, "dept_admin")
+        dbname = "dfs://" + param.name + "_" + user + "_*"
+        grant(user, DB_OWNER, dbname)
+        grant("admin", DB_OWNER)
+
+        addGroupMember(user, "mgmt_data")
+        // 审核员权限
+        addGroupMember(user, "mgmt_review")
+        // 编辑权限
+        addGroupMember(user, "mgmt_factor")
+        addGroupMember(user, "mgmt_strategy")
+        // 所有可读表格权限
+        access_tbs = select * from loadTable("dfs://mgmt_user_access","user_access") where deptName = param.name;
+        access_tbs = select * from access_tbs where isDuplicated([username,dbName,tableName],LAST)=false;
+        access_tbs = select dbName as database, tableName as table from access_tbs where isDeleted = false;
+
+        for (i in access_tbs) {
+            if(existsTable(i.database, i.table)){
+                tb = i.database + "/"+ i.table
+                grant(user, TABLE_READ, tb)
+                grant(user, DB_MANAGE, i.database)
+                user_access.tableInsert(table(user as username, param.name as deptName, i.database as dbName, i.table as tableName, false as isDeleted))
+            }
+        }
+        dept.tableInsert(table(param.name as deptName, user as username, true as DeptAdmin, true as isDeptReviewer, true as isDeptFacEditor, true as isDeptData, false as isDeptStrategyEditor))
+    }
+    
+    // 检查并更新用户权限
+    users_checklist = delete_users.join(admin_to_member)
+    for (user in users_checklist) {
+        facplf_check_user_access(user)
+    }
+    
+    // 修改昵称
+    nickname_list = exec distinct nickname, deptName, createTime from dept_name context by deptName limit -1
+    old_nickname = exec nickname from nickname_list where deptName = param.name
+    if ((param.nickname!=old_nickname)[0]) {
+        if (param.nickname in (exec nickname from nickname_list)){
+            throw toStdJson({code: "S010"})
+        } else {
+            createTime  = exec createTime from nickname_list where deptName = param.name
+            dept_name.tableInsert(table(param.name as deptName, param.nickname as nickname, createTime as createTime))
+        }
+    }
+}

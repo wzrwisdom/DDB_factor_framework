@@ -1,0 +1,105 @@
+grant("admin", DB_OWNER)
+
+def facplfCheckNode() {
+    if(!(getNodeType() in [0,3])) {
+        throw "请使用数据节点部署并使用因子开发管理平台"
+    }
+}
+
+def facplfDropFunctionViews(prefix) {//prefix = "facplf_%"
+    funcs = exec name from getFunctionViews() where name like prefix
+    for(func in funcs){
+        // undef all;go;
+        try{dropFunctionView(func)}catch(ex){};go;
+        try{undef(func, DEF)}catch(ex){};go;
+    }
+}
+
+def facplfAddFunctionViews(prefix) {//prefix = "facplf_%"
+    funcs = exec name from defs() where name like prefix
+    addedFuncs = exec name from getFunctionViews() where name like prefix
+    funcViews = (set(funcs) - set(addedFuncs)).keys()
+    for(func in funcViews){
+        try{addFunctionView(funcByName(func))}catch(ex){print(ex)};go;
+    }
+}
+
+def facplfGrantFunctionViews(prefix) {
+    funcs = exec name from getFunctionViews() where name like prefix
+    // grant VIEW_EXEC of function view in terms of group 
+    // admin
+    onlyAdmin = ["facplf_activate_user", "facplf_activate_multi", "facplf_deactivate_user", "facplf_resetPwd", "facplf_del_user", "facplf_create_user", "facplf_create_dept", "facplf_del_dept", "facplf_get_all_user_info"]
+    each(grant, take("admin", size(onlyAdmin)), take(VIEW_EXEC, size(onlyAdmin)), onlyAdmin)
+
+    // dept_admin
+    deptAdmin = ["facplf_get_user_list", "facplf_get_user_detail", "facplf_edit_user"]
+    each(grant, take("dept_admin", size(deptAdmin)), take(VIEW_EXEC, size(deptAdmin)), deptAdmin)
+
+    // mgmt_review
+    mgmtReview = ['facplf_delete_public_factor', 'facplf_delete_public_factor_template', 'facplf_get_my_factor_review_list', 'facplf_approve_factor', 'facplf_approve_multi_factors', 'facplf_reject_factor', 'facplf_get_my_temp_review_list', 'facplf_approve_temp', 'facplf_approve_multi_temps', 'facplf_reject_temp', 'facplf_publish_factor', 'facplf_publish_temp']
+    each(grant, take("mgmt_review", size(mgmtReview)), take(VIEW_EXEC, size(mgmtReview)), mgmtReview)
+
+    // review_admin
+    reviewAdmin = ['facplf_delete_public_factor', 'facplf_delete_public_factor_template', 'facplf_get_my_factor_review_list', 'facplf_approve_factor', 'facplf_approve_multi_factors', 'facplf_reject_factor', 'facplf_get_my_temp_review_list', 'facplf_approve_temp', 'facplf_approve_multi_temps', 'facplf_reject_temp']
+    each(grant, take("review_admin", size(reviewAdmin)), take(VIEW_EXEC, size(reviewAdmin)), reviewAdmin)
+
+    // 数据导入权限
+    // data_admin + mgmt_data + review_admin
+    dataAll = [`facplf_data_import_lib_list,`facplf_delete_data_import_lib,`facplf_data_import_lib_detail,`facplf_data_import_template_list,`facplf_delete_data_import_template,`facplf_get_data_import_template_params,`facplf_data_import_template_detail,`facplf_get_data_import_records,`facplf_parse_data_import_job_return,`facplf_get_data_import_record_detail,`facplf_get_data_import_progress_detail,`facplf_run_data_import]
+    each(grant, take('data_admin', size(dataAll)),take(VIEW_EXEC, size(dataAll)), dataAll)
+    each(grant, take('mgmt_data', size(dataAll)),take(VIEW_EXEC, size(dataAll)), dataAll)
+    each(grant, take('review_admin', size(dataAll)),take(VIEW_EXEC, size(dataAll)), dataAll)
+
+    // data_admin + mgmt_data
+    dataPart = [`facplf_create_new_data_import_lib,`facplf_edit_data_import_lib,`facplf_save_data_import_lib_code,`facplf_create_new_data_import_template,`facplf_edit_data_import_template,`facplf_edit_data_import_template_code]
+    each(grant,take('data_admin', size(dataPart)),take(VIEW_EXEC, size(dataPart)), dataPart)
+    each(grant,take('mgmt_data', size(dataPart)),take(VIEW_EXEC, size(dataPart)), dataPart)
+
+    // platform_access
+    exclude_funcs = [onlyAdmin, deptAdmin, mgmtReview, reviewAdmin, dataAll, dataPart].flatten()
+    accessFuncs = (set(funcs) - set(exclude_funcs)).keys()
+    each(grant,take('platform_access', size(accessFuncs)),take(VIEW_EXEC, size(accessFuncs)), accessFuncs)
+}
+
+def facplfSetEnvironment() {
+    path = getHomeDir() + "/factorLab/init/";go;
+
+    // 1. create backend tables
+    run(path + "createTables.dos",false,false);go;
+
+    // 2. create built-ins
+    run(path + "setEnvironment.dos",false,false);go;
+
+    // 3. define apis
+    apiFile = ["public", "mgmt", "login", "test", "factor", "analysis", "post", "review", "notification","dataImport", "workflow", "jobMonitoring"]
+    apiPath = path + "api/" + apiFile + ".dos"
+
+    for(ap in apiPath){//ap = apiPath[5]
+        try{
+            run(ap,false,false)
+        }catch(ex){
+            print(ap)
+            throw ex
+        }
+    }
+
+    // 4. add FunctionViews
+    facplfAddFunctionViews("facplf_%");go
+
+    // 5. grant FunctionViews
+    facplfGrantFunctionViews("facplf_%")
+}
+
+// Step0: Node check
+facplfCheckNode()
+
+// Step1: clear Environment
+facplfDropFunctionViews("facplf_%");go
+
+// Step2: initiate factorLab
+facplfSetEnvironment();go
+
+use factorPlatform::facplf
+print("因子开发管理平台"+facplf_get_version()+"版本初始化完成，请使用链接访问: ip:port/factor-platform/index.html")
+
+undef all

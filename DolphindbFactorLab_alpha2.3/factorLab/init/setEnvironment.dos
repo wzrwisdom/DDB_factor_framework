@@ -1,0 +1,582 @@
+// Enviromental Settings
+// 创建group
+def init_group() {
+    allGroups = getGroupList()
+    //检查是否存在因子平台组
+    facplfGroups = ["platform_access", "data_admin", "dept_admin", "review_admin", "mgmt_data", "mgmt_strategy", "mgmt_factor", "mgmt_review"]
+    if(all(facplfGroups in allGroups)){
+        return NULL
+    } else {
+        for(group in facplfGroups) {
+            try{createGroup(group,`admin)}catch(ex){}
+        }
+        //检查是否所有组成功建立
+        if(!all(facplfGroups in getGroupList())){
+            failedGroup = facplfGroups[!(facplfGroups in getGroupList())]
+            throw failedGroup.concat(", ") + "创建失败"
+        }
+    }
+}
+
+// 读取服务器内文件
+def init_readScript(filePath){
+    f = file(filePath)
+    len = f.seek(0, TAIL)
+    f.seek(0, HEAD)
+    return f.readBytes(len).concat()
+}
+
+// 内置因子模板
+def init_built_in_factor_templates_preset() {
+    temp_tb = loadTable("dfs://temp_public_info", "public_info")
+    preset_tb = loadTable("dfs://preset_param_info", "param_info")
+    temp_drf = loadTable("dfs://temp_draft_info", "draft_info")
+
+    //每次更新保留原来的tempId, 无则生成新的
+    tempId = exec tempId from temp_tb where username = "DolphinDB" context by tempId limit -1
+    if (count(tempId) != 4){tempId = rand(uuid(),4)}
+
+    demoId = exec tempId from temp_drf where username = "DolphinDB" context by tempId limit -1
+    if (count(demoId) != 1){demoId = rand(uuid(),1)[0]}
+
+    try{
+        delete from temp_tb where username = "DolphinDB"
+        delete from temp_drf where username = "DolphinDB"
+        delete from preset_tb where username = "DolphinDB" and presetName = "默认控件类型" and presetType like "factor_template_%"
+    }catch(ex){throw "因子模板初始化失败"}
+
+    //demo template
+    path = getHomeDir() + "/factorLab/built-in/factor-template/"
+    demo_code = init_readScript(path + "demo.dos")
+    temp_drf.append!(table(
+        demoId as `tempId,
+        "demo" as `tempName,
+        "DolphinDB" as `username,
+        0 as `tempCat,
+        demo_code as `tempCode,
+        now() as `createTime,
+        now() as `lastModified,
+        'SQL' as `factorCat,
+        string(NULL) as `comment,
+        string(NULL) as `tags,
+        false as `isDeleted
+    ))
+
+    //built-in template
+    temp_name = array(STRING)
+    temp_code = array(STRING)
+    temp_name = `sql_without_groupby`prepData`panel_call`sql_with_groupby
+    for(i in temp_name){//i = temp_name[0]
+        temp_path = path + i + ".dos"
+        code = init_readScript(temp_path)
+        temp_code.append!(code)
+    }
+    
+    factorCat = ['SQL','SQL,面板','面板',"SQL"]
+    tmp = table(
+        tempId as tempId,
+        temp_name as tempName,
+        take("DolphinDB", 4) as username,
+        take(0,4) as tempCat,
+        take(string(NULL), 4) as comment,
+        take('facplf$public',4) as deptName,
+        take(string(NULL), 4) as reviewer,
+        take(now(),4) as reviewTime,
+        factorCat,
+        take(string(NULL), 4) as tags,
+        temp_code as tempCode,
+        take(false,4) as isDeleted,
+        take(string(NULL), 4) as remover)
+    temp_tb.append!(tmp)
+
+    presets = array(STRING)
+    //sql_without_groupby
+    presets.append!(toJson([{"name":"data","type":"db_tb_select"},{"name":"startDate","type":"date"},{"name":"endDate","type":"date"},{"name":"factorName","type":"factor"},{"name":"oriName","type":"string", "description": "参数值(包括原始数据中的列名和其他给定参数值)，例如OfferPrice,OfferOrderQty,20"},{"name":"tarName","type":"string", "description": "参数名(定义的因子函数中的参数名称)， 例如ask,askQty,lag"},{"name":"securityidName","type":"string","description": "data表中股票列的列名， 例如securityid" },{"name":"tradetimeName", "type":"string","description": "data表中时间列的列名,例如tradetime"}]))
+
+    //prepData
+    presets.append!(toJson([{"name":"rawData","type":"db_tb_select"},{"name":"startDate","type":"date"},{"name":"endDate","type":"date"}, {"name":"oriName","type":"string", "description": "参数值(包括原始数据中的列名和其他给定参数值)，例如OfferPrice,OfferOrderQty"},{"name":"tarName","type":"string", "description": "参数名(定义的因子函数中的参数名称)， 例如ask,askQty"},{"name":"securityidName","type":"string","description": "data表中股票列的列名， 例如securityid" },{"name":"tradetimeName", "type":"string","description": "data表中时间列的列名,例如tradetime"}]))
+
+    //panel_call
+    presets.append!(toJson([{"name":"rawdata","type":NULL},{"name":"startDate","type":"date"},{"name":"endDate","type":"date"},{"name":"factorName","type":"factor"},{"name":"securityidName","type":"string","description": "data表中股票列的列名， 例如securityid" },{"name":"tradetimeName", "type":"string","description": "data表中时间列的列名,例如tradetime"}]))
+
+    //sql_with_groupby
+    presets.append!(toJson([{"name":"data","type":"db_tb_select"},{"name":"startDate","type":"date"},{"name":"endDate","type":"date"},{"name":"factorName","type":"factor"},{"name":"oriName","type":"string", "description": "参数值(包括原始数据中的列名和其他给定参数值)，例如OfferPrice,OfferOrderQty,20"},{"name":"tarName","type":"string", "description": "参数名(定义的因子函数中的参数名称)， 例如ask,askQty,lag"},{"name":"securityidName","type":"string","description": "data表中股票列的列名， 例如securityid" },{"name":"tradetimeName", "type":"string","description": "data表中时间列的列名,例如tradetime"}]))
+
+
+    tmp2 = table(
+        take('DolphinDB', 4) as username,
+        take("默认控件类型",4) as presetName,
+        'factor_template_' + string(tmp.tempId) as presetType,
+        presets as preset,
+        take(now(),4) as lastModified,
+        take(false,4) as isDeleted)
+
+    preset_tb.append!(tmp2)
+}
+
+// 建立因子结果存储数据库
+def init_create_factor_result_db(dbName, tbName, freq) {
+    if(existsDatabase(dbName)){
+        return NULL
+    } else {
+        dbUser = database("", VALUE, `user1`user2)
+        if (freq in `low`med) {
+            dbTime = database("", VALUE, 2010.01M..2010.12M)
+        } else if (freq == `high) {
+            dbTime = database("", VALUE, 2010.01.01..2010.01.31)
+        } else {
+            throw '建立因子库失败不支持该频率'
+        }
+
+        dbFactor = database("", VALUE, `alpha1`alpha2)
+
+        db = database(directory=dbName, partitionType=COMPO, partitionScheme=[dbUser, dbTime, dbFactor], engine="TSDB")
+
+        col_names = `username`tradetime`securityid`factorname`value
+        col_types = [SYMBOL, TIMESTAMP, SYMBOL, SYMBOL, DOUBLE]
+
+        db.createPartitionedTable(table=table(1:0, col_names, col_types), tableName=tbName, partitionColumns=["username", "tradetime","factorname"], sortColumns =["username", "securityid", "tradetime"], compressMethods={tradetime:"delta"}, keepDuplicates=LAST)
+        tb = dbName+"/"+tbName
+        grant("platform_access", TABLE_READ, tb)
+        grant("platform_access", TABLE_WRITE, tb)
+
+        print("因子结果存储数据库表"+tb+"建立成功")
+    }
+}
+
+// 按频率建立因子结果存储数据库
+def init_factor_result_storage() {
+    init_create_factor_result_db("dfs://public_LOW", "low", "low")
+    init_create_factor_result_db("dfs://public_MEDIUM", "medium", "med")
+    init_create_factor_result_db("dfs://public_HIGH", "high", "high")
+}
+
+// 内置数据导入模板
+def init_built_in_data_import() {
+    module_info = loadTable("dfs://data_module_info", "module_info")
+    template_info = loadTable("dfs://data_template_info", "template_info")
+    preset_tb = loadTable("dfs://preset_param_info", "param_info")
+    
+    //每次更新保留原来的tempId, 无则生成新的
+    //Demo
+    demoId = exec dtid from template_info where username = 'DolphinDB' and templateName = "demoMain" context by dtid limit -1
+    if (count(demoId) != 1){demoId = rand(uuid(),1)}
+    //CSV
+    csvId = exec dtid from template_info where username = 'DolphinDB' and templateName = "loadCSVMain" context by dtid limit -1
+    if (count(csvId) != 1){csvId = rand(uuid(),1)}
+
+    demos = ["demoMain", "loadCSVMain"]
+    //TLData
+    tempId = exec dtid from template_info where username = 'DolphinDB' and templateName not in demos context by dtid limit -1
+    if (count(tempId) != 3){tempId = rand(uuid(),3)}
+
+    try {
+        delete from module_info where username = 'DolphinDB';
+        delete from template_info where username = 'DolphinDB';
+        delete from preset_tb where username = "DolphinDB" and presetName = "默认控件类型" and presetType like "data_import_template_%"
+    } catch(ex) {print("数据导入初始化失败")}
+
+    path = getHomeDir() + "/factorLab/built-in/import"
+
+    // demo
+    tmp_tags = "built-in".split(",")
+    tmp_code = init_readScript(path + "/demo.dos")
+    module_info.append!(table(rand(uuid(), 1) as dlid, "demo" as moduleName, 'DolphinDB' as username, now() as createTime, now() as updateTime, tmp_code as code, concat(tmp_tags, ",") as tags, "内置数据导入函数库" as comment, false as isDeleted))
+
+    tmp_code_main = init_readScript(path + "/demoMain.dos")
+    template_info.append!(table(demoId as dtid, "demoMain" as moduleName, 'DolphinDB' as username, now() as createTime, now() as updateTime, tmp_code_main as code, "rootPath,dbName,tbName,startDate,endDate,threadNum,initDb,initTb" as parameter, concat(tmp_tags, ",") as tags, "内置数据导入模板" as comment, false as isDeleted))
+    demoPreset = toJson([{"type": "string","name": "rootPath"},{"type": "string","name": "dbName"},{"type": "string","name": "tbName"},{"type": "date","name": "startDate"},{"type": "date","name": "endDate"},{"type": "int","name": "threadNum"},{"type": "bool","name": "initDb"}, {"type": "bool","name": "initTb"}])
+    preset_tb.append!(table('DolphinDB' as `username, "默认控件类型" as `presetName, 'data_import_template_' + string(demoId) as `presetType, demoPreset as `preset, now() as `lastModified, false as `isDeleted))
+
+    csv_main_code = init_readScript(path + "/loadCSVMain.dos")
+    template_info.append!(table(csvId as dtid, "loadCSVMain" as moduleName, 'DolphinDB' as username, now() as createTime, now() as updateTime, csv_main_code as "code", "dbName,tbName,path" as parameter, concat(tmp_tags, ",") as tags, "内置数据导入模板" as comment, false as isDeleted))
+    csvPreset = toJson([{"type": "string","name": "dbName"},{"type": "string","name": "tbName"},{"type": "string","name": "path"}])
+    preset_tb.append!(table('DolphinDB' as `username, "默认控件类型" as `presetName, 'data_import_template_' + string(csvId) as `presetType, csvPreset as `preset, now() as `lastModified, false as `isDeleted))
+
+    // TL
+    tl_path = path + "/TLData"
+
+    initial_TL_module = ['/TLDataModule']
+    initial_TL_template = ['/entrustMain', '/snapshotMain', '/tradeMain']
+
+    for (i in initial_TL_module) {//i = initial_TL_module[0]
+        tmp_path = tl_path + i + ".dos"
+        tmp_code = init_readScript(tmp_path)
+        tmp_tags = "built-in TLData".split(",")
+        module_info.append!(
+            table(rand(uuid(), 1) as dlid, 
+            i.split("/")[size(i.split("/"))-1] as moduleName, 
+            'DolphinDB' as username, 
+            now() as createTime, 
+            now() as updateTime, 
+            tmp_code as code, 
+            concat(tmp_tags, ",") as tags, 
+            "内置通联数据导入函数库" as comment, false as isDeleted))
+    }
+
+    // 锁定内置控件类型
+    preset = toJson([{"type": "string","name": "rootPath"},{"type": "string","name": "dbName"},{"type": "string","name": "tbName"},{"type": "string","name": "market"},{"type": "date","name": "startDate"},{"type": "date","name": "endDate"},{"type": "int","name": "threadNum"},{"type": "bool","name": "initDb"}, {"type": "bool","name": "initTb"}])
+
+    //运行数据导入函数库
+    module_tb = select * from module_info where username = "DolphinDB" context by dlid limit -1
+    module_tb = select * from module_tb where isDeleted = false
+    try{each(loadModuleFromScript, module_tb.moduleName, module_tb.code, true)}catch(ex){print(ex)}
+
+    for (n in 0..(count(initial_TL_template)-1)) {//n = 0
+        i = initial_TL_template[n]
+        tmp_path = tl_path + i + ".dos"
+        tmp_code = init_readScript(tmp_path)
+        tmp_tags = "built-in TLData".split(",")
+
+        tmp_module_name = i.split("/")[size(i.split("/"))-1]
+        loadModuleFromScript(tmp_module_name, "module " + tmp_module_name + "\n" + tmp_code, true)
+
+        tmp_name = i.split("/")[size(i.split("/"))-1] + "::%"
+        tmp_params = select syntax from defs() where name like tmp_name
+        params = substr(tmp_params.syntax[0], 1, strlen(tmp_params.syntax[0])-2)
+
+        template_info.append!(
+            table(
+                tempId[n] as dtid,
+                i.split("/")[size(i.split("/"))-1] as templateName,
+                'DolphinDB' as username,
+                now() as createTime,
+                now() as updateTime,
+                tmp_code as code,
+                params as parameter,
+                concat(tmp_tags, ",") as tags,
+                "内置通联数据导入模板" as comment,
+                false as isDeleted))
+
+        pt = table(
+            'DolphinDB' as username, 
+            "默认控件类型" as presetName, 
+            'data_import_template_' + string(tempId[n]) as presetType, 
+            preset as preset, 
+            now() as lastModified, 
+            false as isDeleted)
+
+        preset_tb.append!(pt)
+    }
+}
+
+// 内置因子
+def init_built_in_facfunc(){
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+
+    // 内置因子模块
+    filename = ["alpha101","alpha191","common","mytt","snapshot","ta","tick"]
+
+    //保存id
+    demoId = last(exec fid from draft_info where username = "DolphinDB" and factorName = "demo")
+    if (count(demoId) != 1){demoId = rand(uuid(),1)[0]}
+
+    factors = exec fid,factorName from public_info where username = "DolphinDB" context by fid limit -1
+    tmpfid = iif(count(factors) == 7, factors.fid, rand(uuid(),7))
+
+    try{
+        delete from draft_info where username = "DolphinDB" and factorName = "demo";
+        delete from public_info where username = "DolphinDB" and factorName in filename;
+        delete from review_info where username = "DolphinDB" and factorName in filename;
+    }catch(ex){throw "因子模块初始化失败"}
+
+    // 因子函数文件路径
+    filedir = getHomeDir()  + "/factorLab/built-in/factor/"
+    //demo
+    demo_code = init_readScript(filedir + "demo.dos")
+    draft_info.append!(table(
+        demoId as `fid,
+        'demo' as `factorName,
+        'DolphinDB' as `username,
+        demo_code as `factorCode,
+        'WQAlpha101,WQAlpha41' as `funcs,
+        now() as `createTime,
+        now() as `lastModified,
+        string(NULL) as `comment,
+        'SQL,面板' as `properties,
+        string(NULL) as `tags,
+        false as `isDeleted
+    ))
+
+    
+    // 因子属性
+    properties = ["SQL,面板","SQL,面板","SQL","SQL,面板","SQL,面板","SQL,面板","SQL,面板"]
+
+    n = count(filename)
+    funcCode = array(STRING)
+    funcs = array(STRING)
+
+    for(i in 0:n){//i = 0
+        filePath = filedir + filename[i] + '.dos'
+        funcCode.append!(init_readScript(filePath))
+    }
+
+    loadModuleFromScript(filename,funcCode, true)
+    for(i in 0:n){
+        redfind = filename[i] + "%"
+        funcname = exec name from defs() where name like redfind
+        funcs.append!(concat(funcname.regexReplace(filename[i] + "::",""),','))
+    }
+
+    public_tb = table(
+            tmpfid as `fid,
+            filename as `factorName,
+            take('DolphinDB', n) as `username,
+            take(string(NULL), n) as `comment,
+            take('facplf$public',n) as `deptName,
+            take('admin', n) as `reviewer,
+            take(now(),n) as `reviewTime,
+            properties as `properties,
+            take(string(NULL), n) as `tags,
+            funcs as `funcs,
+            take(false,n) as `isDeleted,
+            take(string(NULL), n) as `remover)
+    public_info.append!(public_tb)
+
+    review_tb = table(
+            rand(uuid(),n) as `reviewId,
+            tmpfid as `fid,
+            tmpfid as `draftFid,
+            filename as `factorName,
+            take('DolphinDB', n) as `username,
+            take(string(NULL), n) as `comment,
+            take(string(NULL),n) as `analysisId,
+            take('DolphinDB', n) as `submitter,
+            take(1,n) as `status,
+            take(string(NULL), n) as `reviewer,
+            take('facplf$public',n) as `reviewDept,
+            take(now(),n) as `uploadTime,
+            take(string(NULL), n) as `note,
+            take(false, n) as `isEncrypted,
+            properties as `properties,
+            funcs as `funcs,
+            take(string(NULL), n) as `tags,
+            funcCode as `factorCode
+            )
+    review_info.append!(review_tb)
+}
+
+// 更新dict
+def init_update_dict(mutable dict, keys, value){
+    key = keys[0]
+    if (count(keys) == 1){
+        dict[key] = value
+    } else {
+        init_update_dict(dict[key], keys[1:], value)
+    }
+}
+
+//内置工作流任务
+def init_built_in_task(){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    temp_info = loadTable("dfs://temp_public_info", "public_info")
+    fac_info = loadTable("dfs://factor_public_info", "public_info")
+    
+    //任务
+    //保留原始的job_id
+    jobId = (exec id from job_list where jobName = "因子计算任务参考" and username = "DolphinDB" and type = 0 limit 1)[0]
+    if (count(jobId) == 0){jobId = rand(uuid(),1)}
+    
+    try{delete from job_list where jobName = "因子计算任务参考" and username = "DolphinDB" and type = 0;}catch(ex){print("工作流任务初始化失败")}
+    
+    //更新内容
+    parameter = {"templates": [{"template_params": [{"name": "data","type": "db_tb_select","value": {"database": "dfs://k_day","table": "k_day"}},{"name": "startDate","type": "date","value": "2010.01.01"},{"name": "endDate","type": "date","value": "2010.01.31"},{"name": "factorName","type": "factor"},{"name": "oriName","type": "string","value": "close, open, high, low"},{"name": "tarName","type": "string","value": "close, open, high, low"},{"name": "securityidName","type": "string","value": "securityid"},{"name": "tradetimeName","type": "string","value": "tradetime"}]}],"factors": [{"funcs": ["WQAlpha101"]}],"is_to_db": false,"to_db": NULL}
+    
+    //计算模板
+    temps = []
+    tempId = last(exec tempId from temp_info where username = "DolphinDB" and tempName = "sql_without_groupby" and tempCat = 0)
+    temp = parameter["templates"][0]
+    temp["template_id"] = tempId
+    temps.append!(temp)
+    parameter["templates"] = temps
+    
+    facs = []
+    fid = last(exec fid from fac_info where username = "DolphinDB" and factorName = "alpha101")
+    factor = parameter["factors"][0]
+    factor["factor_id"] = fid
+    facs.append!(factor)
+    parameter["factors"] = facs
+
+    comment = "这是DolphinDB为用户内置的因子计算任务的参考，其中参数都为虚拟设置，无法真正运行。"
+    job_list.append!(table(
+        jobId as `id,
+        "因子计算任务参考" as `jobName,
+        "DolphinDB" as `username,
+        now() as `updateTime,
+        blob(toStdJson(parameter)) as `parameter,
+        0 as `type,
+        1 as `jobType,
+        comment as `comment,
+        false as `isDeleted))
+}
+
+//内置工作流
+def init_built_in_workflow(){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    temp_info = loadTable("dfs://temp_public_info", "public_info")
+    fac_info = loadTable("dfs://factor_public_info", "public_info")
+    
+    //任务
+    //保留原始的job_id
+    wid = (exec id from job_list where jobName = "工作流参考" and username = "DolphinDB" and type = 1 limit 1)[0]
+    if (count(wid) == 0){wid = rand(uuid(),1)}
+    
+    try{delete from job_list where jobName = "工作流参考" and username = "DolphinDB" and type = 1;}catch(ex){print("工作流初始化失败")}
+    
+    //更新内容    
+    parameter = {"graph_data": {"nodes": {"mAPkF_dL4nCEXKvYqAquH": {"width": 200,"height": 40,"id": "mAPkF_dL4nCEXKvYqAquH","type": "factor","position": {"x": 400,"y": 200},"positionAbsolute": {"x": 400,"y": 200},"data": {"name": "因子计算任务参考","params": {"templates": [{"template_params": [{"name": "data","type": "db_tb_select","value": {"database": "dfs://k_day","table": "k_day"}},{"name": "startDate","type": "date","value": "2010.01.01"},{"name": "endDate","type": "date","value": "2010.01.31"},{"name": "factorName","type": "factor"},{"name": "oriName","type": "string","value": "close, open, high, low"},{"name": "tarName","type": "string","value": "close, open, high, low"},{"name": "securityidName","type": "string","value": "securityid"},{"name": "tradetimeName","type": "string","value": "tradetime"}]}],"factors": [{"funcs": ["WQAlpha101"]}],"is_to_db": false,"to_db": null},"type": 1}}},"edges": []}}
+
+    temps = []
+    node0 = parameter["graph_data"]["nodes"].keys()[0]
+    tempId = last(exec tempId from temp_info where username = "DolphinDB" and tempName = "sql_without_groupby" and tempCat = 0)
+    temp = parameter["graph_data"]["nodes"][node0]["data"]["params"]["templates"][0]
+    temp["template_id"] = tempId
+    temps.append!(temp)
+    init_update_dict(parameter, ["graph_data", "nodes", node0, "data","params", "templates"], temps)
+
+    facs = []
+    fid = last(exec fid from fac_info where username = "DolphinDB" and factorName = "alpha101")
+    factor = parameter["graph_data"]["nodes"][node0]["data"]["params"]["factors"][0]
+    factor["factor_id"] = fid
+    facs.append!(factor)
+    init_update_dict(parameter, ["graph_data", "nodes", node0, "data","params", "factors"], facs)
+
+    comment = "这是DolphinDB为用户内置的工作流任务编排参考，其中参数都为虚拟设置，无法真正运行。"
+    job_list.append!(table(
+        wid as `id,
+        "工作流参考" as `jobName,
+        "DolphinDB" as `username,
+        now() as `updateTime,
+        blob(toStdJson(parameter.graph_data)) as `parameter,
+        1 as `type,
+        1 as `jobType,
+        comment as `comment,
+        false as `isDeleted))
+}
+
+//获取集群modules路径
+def init_get_module_dir(node){
+    homedir = rpc(node, getHomeDir)
+    moduledir = rpc(node, getConfig, "moduleDir")
+
+    isRelative = rpc(node, exists, homedir + '/' + moduledir)
+    path = iif(isRelative, homedir + '/' + moduledir, moduledir)
+    return path
+}
+
+//给集群内其他节点同步modules
+def init_upload_module(){
+    // 当前节点
+    cur_node = getNodeAlias()
+    
+    // 获取其他data, compute nodes
+    other_node = exec node from pnodeRun(getNodeAlias) where node != cur_node
+
+    // 单节点则退出
+    if (count(other_node)==0){return NULL}
+
+    // 存module dir
+    cur_dir = init_get_module_dir(cur_node)
+    module_path = array(STRING)
+    module_path.append!(cur_dir + "/factorPlatform/facplf.dos")
+
+    // 读取modules
+    script = each(init_readScript, module_path)
+
+    //为其他nodes写入modules
+    for (node in other_node){//i = other_node[0]
+        //新建子目录
+        node_dir = init_get_module_dir(node)
+        try{rpc(node, mkdir, node_dir + "/factorPlatform");}catch(ex){}
+
+        //写入
+        //facplf
+        try{
+            rpc(node, saveTextFile, script[0], node_dir + "/factorPlatform/facplf.dos", false)
+        }catch(ex){
+            print("factorPlatform模块同步失败:" + ex[0] + "->" + ex[1])
+        }
+    }
+}
+
+// 内置因子分析alphalens
+def init_built_in_analysis() {
+    library_info = loadTable("dfs://analysis_library_info", "library_info")
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    preset_tb = loadTable("dfs://preset_param_info", "param_info")
+    
+    //每次更新保留原来的Id, 无则生成新的
+    //alphalens
+    alphalensId = exec atid from template_info where username = 'DolphinDB' and templateName = "alphalensMain" context by atid limit -1
+    if (count(alphalensId) != 1){alphalensId = rand(uuid(),1)}
+
+    try {
+        delete from library_info where username = 'DolphinDB';
+        delete from template_info where username = 'DolphinDB';
+        delete from preset_tb where username = "DolphinDB" and presetName = "默认控件类型" and presetType like "analysis_template_%"
+    } catch(ex) {print("因子评价初始化失败")}
+    path = getHomeDir() + "/factorLab/built-in/factor-analysis"
+
+    tmp_code = init_readScript(path + "/alphalens.dos")
+    loadModuleFromScript("alphalens", tmp_code, true)
+    library_info.append!(table(rand(uuid(), 1) as alid, "alphalens" as moduleName, 'DolphinDB' as username, now() as createTime, now() as updateTime, tmp_code as code, "built-in" as tags, "内置因子评价函数库" as comment, false as isDeleted))
+
+    tmp_code_main = init_readScript(path + "/alphalensMain.dos")
+    runScript(tmp_code_main)
+    tempParameters = (exec syntax from defs("alphalensMain"))[0]
+    tempParams = substr(tempParameters, 1, strlen(tempParameters)-2)
+    tempConfig = blob(string(toStdJson(
+        {"version":"1","layout":{"id":"$$root$$","type":"root","props":{"chartTheme":"default","showInfo":true},"children":[{"type":"text","props":{"content":"描述性统计","level":"h3"},"id":"rAadgkAkoudqpgJk48Xl9"},{"type":"table","props":{"pagination":{"pageSize":0},"config":[{"name":"因子值","key":"factor_quantile","fixed":"right","width":180},{"name":"最小值","key":"min","fixed":false,"formatType":"number","formatOptions":{"thousandSeparated":false,"mantissa":2},"width":180},{"name":"最大值","key":"max","fixed":false,"formatType":"number","formatOptions":{"thousandSeparated":false,"mantissa":2},"width":200},{"name":"平均值","key":"mean","formatType":"number","formatOptions":{"thousandSeparated":false,"mantissa":2},"fixed":false,"width":180},{"name":"标准值","key":"std","formatType":"number","formatOptions":{"thousandSeparated":false,"mantissa":2},"fixed":false,"width":180},{"name":"数量","key":"count","formatType":"number","formatOptions":{"mantissa":2,"thousandSeparated":false},"fixed":false,"width":180},{"name":"百分比","key":"count_","formatType":"percent","formatOptions":null,"fixed":false,"width":180}],"title":"","dataSource":"quantile_stats","showAllData":true},"id":"Nv5HRC_vgNnC-P3vb7D8u"},{"type":"text","props":{"content":"IC分析","level":"h3"},"id":"PQQy2NxJa8MnhOB4-wWUr"},{"type":"table","props":{"pagination":{"pageSize":0},"config":[{"name":"信息系数","key":"Information_Analysis","fixed":false,"width":200},{"name":"1天","key":"forward_returns_1D","fixed":false,"width":200},{"name":"5天","key":"forward_returns_5D","fixed":false,"width":200},{"name":"10天","key":"forward_returns_10D","formatType":"","formatOptions":null,"fixed":false,"width":200}],"title":"","dataSource":"Information_Analysis","showAllData":true},"id":"u64a98dOxRguNqOaQUYuC"},{"type":"text","props":{"content":"周期 IC 统计结果折线图","level":"h4"},"id":"0SNGFgs7EZ-882DLExUBg"},{"type":"row","props":{"layout":"divide-three","minHeight":300},"children":[{"type":"chart","props":{"type":"line","xAxis":{"field":"date","name":"","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"forward_returns_${periods.0}D","name":"信息系数","showTitle":true,"formatType":"number","formatOptions":{"mantissa":2,"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"近 ${periods.0} 天的次日收益率信息系数","dataSource":"ic_ts","slider":true,"label":false,"groupSeriesField":"group"},"id":"uezAUbHqq2yfJ1LKDVfRk"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"forward_returns_${periods.1}D","showTitle":false,"formatType":"number","formatOptions":{"mantissa":2,"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"近 ${periods.1} 天的次日收益率信息系数","dataSource":"ic_ts","slider":true,"label":false,"groupSeriesField":"group"},"id":"k2A5xnxomL5ECWuwkM18j"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"forward_returns_${periods.2}D","showTitle":false,"formatType":"number","formatOptions":{"mantissa":2,"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"近 ${periods.2} 天的次日收益率信息系数","dataSource":"ic_ts","slider":true,"label":false,"groupSeriesField":"group"},"id":"35kggUyr0GaO7rhoupUxl"}],"id":"fcgbNxkPuCOCuBwjSbVU4"},{"type":"text","props":{"content":"周期 IC 统计结果直方图","level":"h4"},"id":"cFtZmi2XLJHDcVY3K3BbH"},{"type":"row","props":{"layout":"divide-three","minHeight":300},"children":[{"type":"chart","props":{"type":"histogram","xAxis":{"field":"x","showTitle":false},"yAxis":{"field":"y","showTitle":false},"legend":true,"tooltip":true,"slider":true,"label":false,"title":"${periods.0} 天信息系数","dataSource":"ic","binField":"forward_returns_${periods.0}D","binWidth":0.01},"id":"SrzpF8Jx0IU_W_GGDPFlv"},{"type":"chart","props":{"type":"histogram","xAxis":{"field":"x","showTitle":false},"yAxis":{"field":"y","showTitle":false},"legend":true,"tooltip":true,"slider":true,"label":false,"title":"${periods.1} 天信息系数","dataSource":"ic","binField":"forward_returns_${periods.1}D","binWidth":0.01},"id":"olerPva-M88iZzk81DdvE"},{"type":"chart","props":{"type":"histogram","xAxis":{"field":"x","showTitle":false},"yAxis":{"field":"y","showTitle":false},"legend":true,"tooltip":true,"slider":true,"label":false,"title":"${periods.2} 天信息系数","dataSource":"ic","binField":"forward_returns_${periods.2}D","binWidth":0.01},"id":"K7xlT-_J6VEKXAciYUb60"}],"id":"LSVfmW_ZB2WmxBFRlffkQ"},{"type":"text","props":{"content":"周期 IC 平均值热力图","level":"h2"},"id":"utEKW7pKJaCyXwpeThi2g"},{"type":"row","props":{"layout":"divide-three","minHeight":300},"children":[{"type":"chart","props":{"type":"heatmap","xAxis":{"field":"month","showTitle":false,"formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"year","showTitle":false},"valueField":"avg_forward_returns_${periods.0}D","legend":true,"tooltip":true,"title":"月均 ${periods.0} 天信息系数","dataSource":"mean_monthly_ic","label":false,"formatType":"number","formatOptions":{"thousandSeparated":false}},"id":"ln-2a_B19__JkqEwPmEKk"},{"type":"chart","props":{"type":"heatmap","xAxis":{"field":"month","showTitle":false},"yAxis":{"field":"year","showTitle":false},"valueField":"avg_forward_returns_${periods.1}D","legend":true,"tooltip":true,"title":"月均 ${periods.1} 天信息系数","dataSource":"mean_monthly_ic","label":false,"formatType":"number","formatOptions":{"thousandSeparated":false}},"id":"eD-CphmL89S12ghKDGEhx"},{"type":"chart","props":{"type":"heatmap","xAxis":{"field":"month","showTitle":false},"yAxis":{"field":"year","showTitle":false},"valueField":"avg_forward_returns_${periods.2}D","legend":true,"tooltip":true,"title":"月均 ${periods.2} 天信息系数","dataSource":"mean_monthly_ic","label":false,"formatType":"number","formatOptions":{"thousandSeparated":false}},"id":"9qDp-bxcBU74Bpxw4RiEL"}],"id":"QeSfUJ_UlfBDr2LrLN__a"},{"type":"text","props":{"content":"收益分析","level":"h3"},"id":"mySSaCBpB87MXW3UcP0q-"},{"type":"table","props":{"pagination":{"pageSize":0},"config":[{"name":"Returns","key":"Returns_Analysis","fixed":false,"width":200},{"name":"${periods.0}D","key":"forward_returns_${periods.0}D","fixed":false,"width":200},{"name":"${periods.1}D","key":"forward_returns_${periods.1}D","fixed":false,"width":200},{"name":"${periods.2}D","key":"forward_returns_${periods.2}D","formatType":"","formatOptions":null,"fixed":false,"width":200}],"title":"周期收益率结果表","dataSource":"returns_analysis","showAllData":true},"id":"Tbga4tg7bhuWwf0oAs6jq"},{"type":"text","props":{"content":"超额收益结果图","level":"h4"},"id":"SQp6SA8vHvEtCD_hhGhM6"},{"type":"row","props":{"layout":"divide-two","minHeight":300},"children":[{"type":"chart","props":{"type":"column","xAxis":{"field":"factor_quantile","name":"","showTitle":false},"yAxis":{"field":"value","name":"超额收益","showTitle":true,"formatType":"number","formatOptions":{"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"分组平均超额收益图","dataSource":"mean_quant_rateret","slider":true,"label":false,"groupSeriesField":"valueType"},"id":"t5xZVRU7icm2yHztvVovn"},{"type":"chart","props":{"type":"violin","xAxis":{"field":"factor_quantile","name":"","showTitle":false},"yAxis":{"field":"value","name":"","showTitle":false},"legend":true,"tooltip":true,"title":"分组超额收益分布图","dataSource":"mean_quant_rateret_bydate","slider":true,"groupSeriesName":"valueType"},"id":"iwuGQRMCpJUjsBQ_HiA8A"}],"id":"kDHzP7nx5hWRETq1vrQKM"},{"type":"text","props":{"content":"收益净值曲线图","level":"h4"},"id":"_oyegpECVNs3pcbYEPZFp"},{"type":"row","props":{"layout":"divide-two","minHeight":300},"children":[{"type":"chart","props":{"type":"line","xAxis":{"field":"date","name":"","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"forward_returns_${periods.0}D","name":"收益净值","showTitle":true,"formatType":"number","formatOptions":{"mantissa":1,"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"因子加权的（多空）累计收益净值曲线图","dataSource":"plot_cumulative_returns_1","slider":true,"label":false},"id":"p7jlo0oQzTFpAcZkJ7oAw"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false},"yAxis":{"field":"value","showTitle":false},"legend":true,"tooltip":true,"title":"因子分组超额收益净值曲线图","dataSource":"cum_ret","slider":true,"label":false,"groupSeriesField":"valueType"},"id":"IGKebHn1dssv0QLJUm7Rk"}],"id":"rCbQYmt6KlvZsWXsxoPCj"},{"type":"text","props":{"content":"最后一组因子-第一组因子平均收益分布图","level":"h4"},"id":"c_k3SuNyxYomTdPSrAduK"},{"type":"row","props":{"layout":"divide-three","minHeight":300},"children":[{"type":"chart","props":{"type":"line","xAxis":{"field":"date","name":"","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"forward_returns_${periods.0}D","name":"平均收益分布","showTitle":true,"formatType":"number","formatOptions":{"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"平均收益分布图（${periods.0}D）","dataSource":"mean_ret_spread_quant","slider":true,"label":false,"groupSeriesField":"group"},"id":"Z2X-otZQnmsDEWmTIiIY7"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"forward_returns_${periods.1}D","showTitle":false,"formatType":"number","formatOptions":{"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"平均收益分布图（${periods.1}D）","dataSource":"mean_ret_spread_quant","slider":true,"label":false,"groupSeriesField":"group"},"id":"WX61fDySX3-HqhI-aOD_e"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"forward_returns_${periods.2}D","showTitle":false,"formatType":"number","formatOptions":{"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"平均收益分布图（${periods.2}D）","dataSource":"mean_ret_spread_quant","slider":true,"label":false,"groupSeriesField":"group"},"id":"Mr-R7UQ5euzsDgKE5_DjQ"}],"id":"j5u5jXVxMbrc6NRV5ASSA"},{"type":"text","props":{"content":"换手率分析","level":"h3"},"id":"U8s0-Ndky0h7dg9mN6JnH"},{"type":"table","props":{"pagination":{"pageSize":0},"config":[{"name":"因子分层","key":"factor_quantile","fixed":false,"width":200},{"name":"第 ${periods.0} 层的平均换手率","key":"${periods.0}","fixed":false,"formatType":"number","formatOptions":{"thousandSeparated":false},"width":200},{"name":"第 ${periods.1} 层的平均换手率","key":"${periods.1}","fixed":false,"formatType":"number","width":200,"formatOptions":{"thousandSeparated":false}},{"name":"第 ${periods.2} 层的平均换手率","key":"${periods.2}","width":200,"formatType":"","formatOptions":null,"fixed":false}],"dataSource":"Mean_Turnover","showAllData":true},"id":"9nJMW7AayzsbpsX00nrjI"},{"type":"table","props":{"pagination":{"pageSize":0},"config":[{"name":"自相关性","key":"Auto_Corr","fixed":false,"width":200},{"name":"${periods.0} 日","key":"${periods.0}","fixed":false,"width":200},{"name":"${periods.1} 日","key":"${periods.1}","fixed":false,"width":200},{"name":"${periods.2} 日","key":"${periods.2}","formatType":"","formatOptions":null,"fixed":false,"width":200}],"dataSource":"Mean_Factor_Rank_Autocorrelation","showAllData":true},"id":"T2V4BOBjcB4hKH5YjK9F0"},{"type":"text","props":{"content":"第一组和最后一组因子换手率时间序列图","level":"h2"},"id":"ERvk5ZuLs6tb7Y7DX-sTS"},{"type":"row","props":{"layout":"divide-three","minHeight":300},"children":[{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"name":"","formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"${periods.0}","showTitle":true,"name":"分层新增标的占比"},"legend":true,"tooltip":true,"title":"${periods.0} 日顶层和底层的换手率","slider":true,"label":false,"dataSource":"quantile_turnover","groupSeriesField":"factor_quantile"},"id":"p4GFLpeTq7IjvqqK9M2Fm"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"${periods.1}","showTitle":false},"legend":true,"tooltip":true,"title":"${periods.1} 日顶层和底层的换手率","slider":true,"label":false,"dataSource":"quantile_turnover","groupSeriesField":"factor_quantile"},"id":"84uRXhHbNmmZE9Zcku6vS"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"10","showTitle":false,"name":"","formatType":"number","formatOptions":{"mantissa":2,"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"${periods.2} 日顶层和底层的换手率","slider":true,"label":false,"dataSource":"quantile_turnover","groupSeriesField":"factor_quantile"},"id":"6o8qplOI79Vhun023s2ZG"}],"id":"eh-rw2FAahHe9EHAdcRWd"},{"type":"text","props":{"content":"不同周期下因子排序自相关图","level":"h4"},"id":"mupoxOdP9d-W0g1Al-jPW"},{"type":"row","props":{"layout":"divide-three","minHeight":300},"children":[{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"${periods.0}","name":"自相关系数","showTitle":true,"formatType":"number","formatOptions":{"mantissa":1,"thousandSeparated":false}},"legend":true,"tooltip":true,"title":"${periods.0} 日因子排名自相关系数","dataSource":"autocorrelation","slider":true,"label":false,"groupSeriesField":""},"id":"kOFBkFlra8L-Apwwt9C5Y"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"${periods.1}","showTitle":false},"legend":true,"tooltip":true,"title":"${periods.1} 日因子排名自相关系数","dataSource":"autocorrelation","slider":true,"label":false},"id":"hki9bkVOGhgMYDI-uo0k0"},{"type":"chart","props":{"type":"line","xAxis":{"field":"date","showTitle":false,"formatType":"time","formatOptions":{"timeFormat":"YYYY-MM-DD"}},"yAxis":{"field":"${periods.2}","showTitle":false},"legend":true,"tooltip":true,"title":"${periods.2}  日因子排名自相关系数","dataSource":"autocorrelation","slider":true,"label":false,"groupSeriesField":""},"id":"bDcnWwaIN22vf3SP_2GgQ"}],"id":"HXDgfeBumN4dGxhuyHOXX"}]}}
+        )))
+
+    template_info.append!(table(alphalensId as atid, "alphalensMain" as templateName, 'DolphinDB' as username, now() as createTime, now() as updateTime, tmp_code_main as code, tempParams as parameter, tempConfig as config, "built-in" as tags, "内置因子评价模板" as comment, false as isDeleted))
+    
+    // 默认配置
+    tempPreset = toJson([{"name": "factorResult","type": "prev_test_result", "description":"前置因子测试结果"},{"name": "priceTable","type": "db_tb_select", "description":"基准数据库表"},{"name": "priceDate","type": "string", "description":"基准时间列"},{"name": "startDate","type": "date", "description":"基准起始时间"},{"name": "endDate","type": "date", "description":"基准结束时间"},{"name": "priceSymbol","type": "string", "description":"股票代码列"},{"name": "priceCol","type": "string", "description":"基准价格列"},{"name": "quantile","type": "int", "description":"因子比例分组,默认值为5"},{"name": "period","type": "string", "description":"调仓周期,默认值为1,5,10"},{"name": "filter_zscore","type": "int", "description":"标准差倍数,默认值为20"},{"name": "max_loss","type": "double", "description":"舍弃数据最大百分比,默认值为0.35"},{"name": "zero_aware","type": "bool", "description":"是否分别计算正负因子值,默认值为false"},{"name": "cumulative_returns","type": "bool", "description":"远期收益计算是否包含累积回报,默认值为true"},{"name": "long_short","type": "bool", "description":"是否计算多空组合收益,默认值为true"}])
+    
+    preset_tb.append!(table('DolphinDB' as `username, "默认控件类型" as `presetName, 'analysis_template_' + string(alphalensId) as `presetType, tempPreset as `preset, now() as `lastModified, false as `isDeleted))
+}
+
+// 给admin赋权
+def init_active_admin() {
+    user_tb = loadTable("dfs://mgmt_user_info", "user_info")
+    dept_tb = loadTable("dfs://mgmt_dept_info", "dept_info")
+    dept_name = loadTable("dfs://mgmt_dept_name", "dept_name")
+
+    //判断admin是否存在于表内
+    admininfo = select * from user_tb where username = "admin" context by username limit -1
+    admininfo = select * from admininfo where isDeleted = false
+
+    //首次初始化
+    if (count(admininfo) == 0){
+        // 加入用户信息
+        token = rpc(getControllerAlias(), getAuthenticatedUserTicket)
+        tmp = table(getCurrentSessionAndUser()[1] as username, token as tokenId, true as isImporter, true as Reviewer, now() as activateTime, true as isActivated, false as isDeleted)
+
+        user_tb.append!(tmp)
+
+        // 内置任务工作流
+        job_list = loadTable("dfs://workflow_job_list", "job_list")
+        builtin = select * from job_list where username = "DolphinDB" and jobName in ["因子计算任务参考", "工作流参考"] context by jobName limit -1
+        update builtin set id = rand(uuid(),2), username = take("admin", 2) , updateTime = take(now(), 2)
+        job_list.append!(builtin)
+    }
+}
+
+// 全部初始化
+def init_all() {
+    try{init_group()}catch(ex){print(ex)}
+    try{init_built_in_facfunc()}catch(ex){print(ex)}
+    try{init_built_in_factor_templates_preset()}catch(ex){print(ex)}
+    try{init_factor_result_storage()}catch(ex){print(ex)}
+    try{init_built_in_data_import()}catch(ex){print(ex)}
+    try{init_built_in_task()}catch(ex){print(ex)}
+    try{init_built_in_workflow()}catch(ex){print(ex)}
+    try{init_upload_module()}catch(ex){print(ex)}
+    try{init_built_in_analysis()}catch(ex){print(ex)}
+    try{init_active_admin()}catch(ex){print(ex)}
+}
+
+init_all()

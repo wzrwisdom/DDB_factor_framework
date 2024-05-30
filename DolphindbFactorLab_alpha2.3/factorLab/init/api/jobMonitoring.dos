@@ -1,0 +1,378 @@
+/////////////
+///任务监控///
+/////////////
+// 获取测试任务监控列表
+def facplf_get_test_monitoring_list(param) { 
+    user = getCurrentSessionAndUser()[1]
+    job_test_tb = loadTable("dfs://job_test_info", "test_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+
+    //更新status_info状态
+    try{facplf_update_job_status()}catch(ex){}
+
+    tmp_dict = dict(STRING, ANY)
+    if (user == "admin") {
+        if (param.type == "single") {
+            test_tb = select * from job_test_tb where category = 0 and isDeleted != true
+        }
+        if (param.type == "batch") {
+            test_tb = select * from job_test_tb where category = 1 and isDeleted != true
+        }
+        if (param.type == "all") {
+            test_tb = select * from job_test_tb where isDeleted != true
+        }
+
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where jobId in test_tb["jobId"] context by jobId limit -1
+    } else {
+        if (param.type == "single") {
+            test_tb = select * from job_test_tb where username = user and category = 0 and isDeleted != true
+        }
+        if (param.type == "batch") {
+            test_tb = select * from job_test_tb where username = user and category = 1 and isDeleted != true
+        }
+        if (param.type == "all") {
+            test_tb = select * from job_test_tb where username = user and isDeleted != true
+        }
+
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where userId = user and jobId in test_tb["jobId"] context by jobId limit -1
+    }
+
+    if (size(test_tb) == 0) {return dict(`items`total, [array(ANY), 0])}
+    
+    test_status_tb = select l.tid, l.jobId, r.endTime, r.errorMsg from test_tb l left join status_tb r on l.jobId = r.jobId
+    tmp_status = table(test_status_tb.tid as tid, each(facplf_parse_job_status, test_status_tb) as job_status)
+    
+    comb_status = select tid, facplf_get_multi_tests_status(job_status) as status from tmp_status group by tid
+
+    tmp = select tid as id, taskname as name, iif(category==0, "single", "batch") as type, createTime as create_time, username as creator, clusterNode as run_node from test_tb context by tid, taskname limit 1
+
+    final_tmp = select * from tmp l inner join comb_status r on l.id = r.tid order by create_time desc
+    
+    tmp_dict[`items] = final_tmp
+    tmp_dict[`total] = size(final_tmp)
+
+    return tmp_dict
+}
+
+// 获取测试任务进度详情
+def facplf_get_test_progress_detail(param) {
+    user = getCurrentSessionAndUser()[1]
+    test_info = loadTable("dfs://job_test_info", "test_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    
+    //状态更新
+    try{facplf_update_job_status()}catch(ex){}
+
+    id = uuid(param.id)
+    // 存在检查
+    test_tb = select * from test_info where tid = id context by jobId limit -1
+    if (count(test_tb) == 0) {throw toStdJson({code:"S034"})}
+
+    jobId_list = test_tb["jobId"]
+    //状态
+    status_tb = select jobId, startTime, endTime, errorMsg from status_info where jobType = 1 and jobId in jobId_list context by jobId limit -1
+    status_tb["status"] = each(facplf_parse_job_status, status_tb)
+
+    test_status_tb = select l.*, r.status from test_tb l left join status_tb r on l.jobId = r.jobId
+
+    // tree: fid -> jobId(s)
+    // factor test的状态
+    factors = exec distinct fid from test_tb
+    
+    res = array(ANY)
+
+    for (fac in factors) {//fac = factors[0]
+        factor = dict(STRING, ANY)
+        fac_test = select * from test_status_tb where fid = fac
+        factor["name"] = (fac_test["funcName"][0]).split("::")[0]
+        factor["status"] = facplf_get_multi_tests_status(fac_test["status"])
+
+        children = select funcName.split("::")[1] as name, status from fac_test
+        factor["children"] = children
+
+        res.append!(factor)
+    }
+
+    return res
+}
+
+// 获取工作流任务监控列表
+def facplf_get_workflow_job_monitoring_list() {
+    user = getCurrentSessionAndUser()[1]
+    workfloW_run_info = loadTable("dfs://workflow_run_info", "run_info")
+    workflow_job_list = loadTable("dfs://workflow_job_list", "job_list")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+
+    // 权限检查
+    if (user == "admin") {
+        run_tb = select * from workfloW_run_info where isDeleted != true context by workflowJobId,taskJobId limit -1
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where jobId in run_tb["taskJobId"] context by jobId limit -1
+        workflow_name = select id, jobName, updateTime from workflow_job_list
+    } else {
+        run_tb = select * from workfloW_run_info where username = user and isDeleted != true context by workflowJobId
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where userID = user and jobId in run_tb["taskJobId"] context by jobId limit -1
+        workflow_name = select id, jobName, updateTime from workflow_job_list where username = user
+    }
+    if (count(run_tb)==0){return dict(`items`total, [array(ANY), 0])}
+
+    //运行记录+状态表
+    comb_tb = select l.*, r.endTime, r.errorMsg from run_tb l inner join status_tb r on l.taskJobId = r.jobId
+    comb_tb["job_status"] = each(facplf_parse_job_status, comb_tb)
+    
+    //任务解析
+    tmp = select first(wid) as wid, min(startTime) as create_time, first(username) as creator, first(clusterNode) as run_node, facplf_get_multi_tests_status(job_status) as status from comb_tb group by workflowJobId
+    
+    tmp_name = select workflowJobId as id, jobName as name, create_time, creator, run_node, status from aj(tmp, workflow_name, `wid`create_time, `id`updateTime) order by create_time desc
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict["items"] = tmp_name
+    tmp_dict["total"] = size(tmp_name)
+
+    return tmp_dict
+}
+
+// 获取工作流任务进度详情
+def facplf_get_workflow_job_detail(param) {
+    workflow_job_list = loadTable("dfs://workflow_job_list", "job_list")
+    workflow_run_info = loadTable("dfs://workflow_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+
+    res = dict(STRING, ANY)
+
+    // 存在检查
+    job_tb = select * from workflow_run_info where workflowJobId = param.id context by taskJobId limit -1
+    job_tb = select * from job_tb where isDeleted = false
+    if (count(job_tb) == 0) {throw toStdJson({code:"S045"})}
+
+    // 获取总任务信息及状态
+    wid = job_tb["wid"][0]
+    start_time = job_tb["startTime"][0]
+    res["name"] = last(exec jobName from workflow_job_list where id = wid and updateTime <= start_time)
+
+    // 子任务状态
+    taskIds = job_tb["taskJobId"]
+    status_tb = select jobId, endTime, startTime, errorMsg from status_info where jobType = 3 and jobId in taskIds context by jobId limit -1
+    status_tb["status"] = each(facplf_parse_job_status, status_tb)
+    // 总任务状态
+    res["status"] = facplf_get_multi_tests_status(status_tb["status"])
+    
+
+    //获取子任务信息及状态
+    children = select l.taskName as name, l.type, r.status from job_tb l left join status_tb r on l.taskJobId = r.jobId
+    res["children"] = children
+
+    return res
+}
+
+// 获取数据导入任务监控列表
+def facplf_get_data_import_monitoring_list() {
+    user = getCurrentSessionAndUser()[1]
+    run_info = loadTable("dfs://data_run_info", "run_info")
+    
+    //更新status_info状态
+    try{facplf_update_job_status()}catch(ex){}
+
+    //admin返回所有人的任务，否则返回自己的
+    if(user == "admin"){
+        run_total = select * from run_info context by drid limit -1
+        run_total = select * from run_total where isDeleted = false
+    }else{
+        run_total = select * from run_info where username = user context by drid limit -1
+        run_total = select * from run_total where isDeleted = false
+    }
+    if (size(run_total) == 0) {return dict(`items`total, [array(ANY), 0])}
+
+    // 针对jobID解析运行状态
+    status_all = array(ANY)
+
+    for(r in run_total) {// r = run_total[1]
+        status_tb = rpc(r.clusterNode, getJobStatusById, r.jobId)
+        status = facplf_parse_job_status(status_tb)
+        status_all.append!(status)
+    }
+
+    run_total["status"] = status_all
+
+    tmp = select drid as id, templateName as name, createTime as create_time, username as creator, clusterNode as run_node, status from run_total order by create_time desc
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`items] = tmp
+    tmp_dict[`total] = size(tmp)
+    return tmp_dict
+}
+
+// 获取数据导入任务进度详情
+def facplf_get_data_import_progress_detail(param) {
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    run_info = loadTable("dfs://data_run_info", "run_info")
+
+    id = uuid(param.id)
+    temp_run = select * from run_info where drid = id context by drid limit -1
+    progress_tb = select * from temp_run where isDeleted = false
+    
+    // 验证是否存在
+    if(count(progress_tb)==0) {throw toStdJson({code:"S062"})}
+    
+    tmp_dict = dict(STRING, ANY)
+    children = []
+    
+    //返回数据导入任务信息
+    tmp_dict[`name] = progress_tb.templateName[0]
+    tmp_dict[`status] = facplf_parse_data_import_job_return(progress_tb.jobId[0], progress_tb.clusterNode[0])[0]
+    
+    // 检查用户是否返回子任务jobid
+    try {
+        tmp = rpc(progress_tb.clusterNode[0], getJobReturn,progress_tb.jobId[0])
+    } catch(ex) {
+        tmp_dict[`children] = []
+        return tmp_dict
+    }
+    
+    if (typestr(tmp) == "STRING") {
+        child_job = dict(STRING, ANY)
+        child_job[`name] = progress_tb.templateName[0]+"_task1"
+        try{
+            res = facplf_get_job_status(tmp, NULL, progress_tb.clusterNode[0])
+            child_job[`status] = res
+        }catch(ex){
+            child_job[`status] = -1
+        }
+        children.append!(child_job)
+    }else if (typestr(tmp) like "%VECTOR") {
+        for (i in 0..(count(tmp) - 1)){//i = 0
+
+            child_job = dict(STRING, ANY)
+            child_job[`name] = progress_tb.templateName[0] + "_task" + string(i+1)
+            try{
+                status_tb = rpc(progress_tb.clusterNode[0], getJobStatusById, tmp[i])
+                res= facplf_parse_job_status(status_tb)
+            }catch(ex){
+                child_job[`status] = -1
+            }
+            child_job[`status] = res
+            children.append!(child_job)
+        }
+    }
+    tmp_dict[`children] = children
+    return tmp_dict
+}
+
+// 获取评价任务监控列表
+def facplf_get_analysis_monitoring_list(param) {
+    user = getCurrentSessionAndUser()[1]
+    run_info = loadTable("dfs://analysis_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+
+    type = param["type"]
+    //admin返回所有人的任务，否则返回自己的
+    if(user == "admin"){
+        run_total = select * from run_info where jobType in type context by aid limit -1
+        run_total = select * from run_total where isDeleted = false
+        status_total = select jobId, startTime, endTime, errorMsg from status_info where jobId in run_total["jobId"] context by jobId limit -1
+    }else{
+        run_total = select * from run_info where username = user and jobType in type context by aid limit -1
+        run_total = select * from run_total where isDeleted = false
+        status_total = select jobId, startTime, endTime, errorMsg from status_info where userID = user and jobId in run_total["jobId"] context by jobId limit -1
+    }
+
+    // 针对jobID解析运行状态
+    run_sta_table = select l.*, r.endTime, r.errorMsg from run_total l inner join status_total r on l.jobId = r.jobId
+    if (count(run_sta_table) == 0){
+        return dict(`items`total, [array(ANY), 0])
+    }else{
+        run_sta_table["status"] = each(facplf_parse_job_status, run_sta_table)
+    }
+
+    tmp = select aid as id, tempName as name, jobType as type, funcName as func_name, createTime as create_time, username as creator, clusterNode as run_node, status from run_sta_table order by create_time desc
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`items] = tmp
+    tmp_dict[`total] = size(tmp)
+    return tmp_dict
+}
+
+// 获取任务运行日志
+def facplf_get_job_message(param) {
+    if (param.type == 'test') {
+        id = uuid(param.id)
+        jobId_list = select jobId, clusterNode from loadTable("dfs://job_test_info", "test_info") where tid = id and isDeleted = false;
+    } else if (param.type == 'workflow') {
+        jobId_list = select taskJobId as jobId, clusterNode from loadTable("dfs://workflow_run_info", "run_info") where workflowJobId = param.id and isDeleted = false;
+    } else if (param.type == 'data-import') {
+        jobId_list = select jobId, clusterNode from loadTable("dfs://data_run_info", "run_info") where drid = uuid(param.id) and isDeleted = false;
+    } else if (param.type == 'analysis') {
+        jobId_list = select jobId, clusterNode from loadTable("dfs://analysis_run_info", "run_info") where aid = uuid(param.id) and isDeleted = false;
+    } else {
+        ret_msg = ''
+    }
+
+    if (size(jobId_list) > 0) {
+        ret = each(rpc{,getJobMessage,}, jobId_list.clusterNode, jobId_list.jobId)
+        ret_msg = concat(ret)
+    } else {
+        ret_msg = ''
+    }
+
+    return dict(`text, [ret_msg])
+}
+
+// 中断任务
+def facplf_cancel_job(param) {
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    //参数检查
+    jobType = ['test', 'analysis', 'workflow', 'data-import']
+    if(!(param.type in jobType)){
+        throw toStdJson({"code": "S075"})
+    }
+
+    //更新status_info状态
+    try{facplf_update_job_status()}catch(ex){}
+
+    try{id = uuid(param.id)}catch(ex){id = param.id}
+    // 先验证此任务正在运行中
+    if (param.type == jobType[0]) {
+        jobId_list = select jobId, clusterNode from loadTable("dfs://job_test_info", "test_info") where tid = id and isDeleted = false;
+        if (count(jobId_list)==0){throw toStdJson({"code": "S034"})}
+
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where jobType = 1 and jobId in jobId_list["jobId"] context by jobId limit -1
+        status = facplf_get_multi_tests_status(each(facplf_parse_job_status, status_tb))
+        
+        if (status != 0){throw toStdJson({"code": "S076"})}
+    }
+
+    if (param.type == jobType[1]){
+        jobId_list = select jobId, clusterNode, isDeleted from loadTable("dfs://analysis_run_info", "run_info") where aid = id context by aid limit -1
+        jobId_list = select * from jobId_list where isDeleted = false
+        if (count(jobId_list)==0) {throw toStdJson({"code": "S088"})}
+
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where jobType = 2 and jobId in jobId_list["jobId"] context by jobId limit -1
+        status = facplf_get_multi_tests_status(each(facplf_parse_job_status, status_tb))
+
+        if (status != 0){throw toStdJson({"code": "S090"})}
+    }
+
+    if (param.type == jobType[2]){
+        jobId_list = select taskJobId as jobId, clusterNode from loadTable("dfs://workflow_run_info", "run_info") where workflowJobId = id and isDeleted = false;
+        if (count(jobId_list)==0){throw toStdJson({"code": "S037"})}
+
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where jobType = 3 and jobId in jobId_list["jobId"] context by jobId limit -1
+        status = facplf_get_multi_tests_status(each(facplf_parse_job_status, status_tb))
+
+        if (status != 0){throw toStdJson({"code": "S042"})}
+
+    }
+
+    if (param.type == jobType[3]){
+        jobId_list = select jobId, clusterNode from loadTable("dfs://data_run_info", "run_info") where drid = id and isDeleted = false;
+        if (count(jobId_list)==0){throw toStdJson({"code": "S062"})}
+
+        status_tb = select jobId, startTime, endTime, errorMsg from status_info where jobType = 4 and jobId in jobId_list["jobId"] context by jobId limit -1
+        status = facplf_get_multi_tests_status(each(facplf_parse_job_status, status_tb))
+
+        if (status != 0){throw toStdJson({"code": "S077"})}
+    }
+
+    for(job in jobId_list){
+        try{rpc(job.clusterNode, cancelJob, job.jobId)}catch(ex){}
+    }
+}

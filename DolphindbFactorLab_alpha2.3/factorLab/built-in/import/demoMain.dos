@@ -1,0 +1,25 @@
+def demoMain(rootPath, dbName, tbName, startDate, endDate, threadNum, initDb=false, initTb=false){
+    // 该模板为用户导入一个csv文件
+    // 但数据库schema已被确定,请查看函数包demo。
+
+    // 创建数据库和分布式表
+    demo::demoCreateDBAndTable(dbName, tbName, initDb, initTb)
+
+    // 获取所有需要导入数据的文件路径
+    filePathList = demo::demoRenderFilePathList(rootPath, startDate, endDate)
+   
+    // 按并行度拆分任务
+	filePathListCutted = demo::demoCutFilePathList(filePathList, threadNum)
+
+	// 提交后台任务
+    jobIdlist = []
+    for (filePathList in filePathListCutted){
+        jobId = demo::demoSubmitJob(filePathList, dbName, tbName)
+        jobIdlist.append!(jobId)
+    }
+
+    demo::demoWriteLogAndPrint("Server_S0200_FACPLF: All jobs submitted successfully.")
+
+    //返回任务ID为平台提供解析
+    return jobIdlist
+}

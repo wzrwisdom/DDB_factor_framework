@@ -1,0 +1,125 @@
+module demo
+
+def demoWriteLogAndPrint(log){
+    writeLog(log)
+    print(log)
+}
+
+def demoFindR(path, pattern=NULL){
+	t = files(path)
+	if (isValid(pattern)){
+		t = files(path, pattern)
+	}
+	res = select * from t where !isDir
+	update res set res.filename = path +"/" + res.filename
+	for (f in select * from files(path) where !!isDir){
+		try {
+			subRes = demoFindR(path+"/"+f.filename, pattern)
+			res.append!(subRes)
+		} catch(ex){
+			print("ex:"+path+"/"+f.filename+ string(f.isDir))
+		}
+	}
+	return res
+}
+
+def demoRenderSchemaTb(){
+	name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`OrderType`OrderNO`Price`OrderQty`Side`BizIndex`LocalTime`SeqNo
+	type = `INT`LONG`INT`SYMBOL`TIMESTAMP`SYMBOL`INT`DOUBLE`INT`SYMBOL`INT`TIME`INT
+	return table(1:0, name, type)
+}
+
+def demoCreateDatabase(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 50])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+
+def demoCreateTable(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=demoRenderSchemaTb(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+
+
+def demoRenderTransformedData(mutable tbNeedTransform, tbAsTarget){
+    t1ColDefs = tbNeedTransform.schema().colDefs
+    t2ColDefs = tbAsTarget.schema().colDefs
+    tbNeedTransform.replaceColumn!(`OrderTime, concatDateTime(2023.01.01, tbNeedTransform.OrderTime))
+    for (i in 0..shape(t2ColDefs)[0]){
+        t1 = t1ColDefs[i]
+        t2 = t2ColDefs[i]
+        if (t1.typeString != t2.typeString){
+            if (t2.typeString == "SYMBOL"){
+                tbNeedTransform.replaceColumn!(t1.name, tbNeedTransform[t1.name].cast(STRING))
+            }
+            tbNeedTransform.replaceColumn!(t1.name, tbNeedTransform[t1.name] $ eval(<t2.typeString>))}
+        }
+    tbNeedTransform.rename!(t2ColDefs.name)
+    return tbNeedTransform
+}
+
+def demoLoadOneFile(filePath, dbName, tbName){
+    ptSchema = demoRenderSchemaTb().schema().colDefs
+    // Check schema
+    csvSchema = extractTextSchema(filePath)
+    if (size(csvSchema['name']) == size(ptSchema['name'])){
+        try{
+            loadTable(dbName, tbName).append!(demoRenderTransformedData(ploadText(filePath), loadTable(dbName, tbName)))
+        }catch(ex){
+            throw ex
+        }
+    }else{
+        demoWriteLogAndPrint("Server_S0400_FACPLF: Failed to load file '" + filePath + "'. Schema of file is not matched with table '" + dbName + ":" + tbName + "'.")
+    }
+}
+
+def demoLoadFiles(filePathList, dbName, tbName){
+    for (filePath in filePathList){
+        demoLoadOneFile(filePath, dbName, tbName)
+        demoWriteLogAndPrint("Server_S0200_FACPLF: File '" + filePath + "' loaded to table '" + dbName + ":" + tbName + "' successfully.")
+    }
+}
+
+def demoCreateDBAndTable(dbName, tbName, initDb, initTb){
+    if (initDb && existsDatabase(dbName)){
+        dropDatabase(dbName)
+        demoWriteLogAndPrint("Server_S0200_FACPLF: Database '" + dbName + "' dropped successfully.")
+    }
+    if (initTb && existsTable(dbName, tbName)){
+        dropTable(database(dbName), tbName)
+        demoWriteLogAndPrint("Server_S0200_FACPLF: Table '" + tbName + "' dropped successfully.")
+    }
+    demoCreateDatabase(dbName)
+    demoWriteLogAndPrint("Server_S0200_FACPLF: Database '" + dbName + "' created successfully.")
+    demoCreateTable(dbName, tbName)
+    demoWriteLogAndPrint("Server_S0200_FACPLF: Table '" + tbName + "' created successfully.")
+}
+
+def demoRenderFilePathList(rootPath, startDate, endDate){
+    filePathList = exec filename from demoFindR(rootPath)
+    return filePathList
+}
+
+def demoRenderDateList(filePathList){
+    return temporalParse(filePathList.split("/").tail().tail(2)[0],"yyyyMMdd")
+}
+
+def demoCutFilePathList(filePathList, threadNum){
+    parallel = min(threadNum, size(filePathList))
+    num = size(filePathList) / parallel
+    cond = size(filePathList) % parallel
+    points = iterate(0, 1, take(num+1, cond+1) <- take(num, parallel - cond-1))
+    filePathListCutted = cut(filePathList, points-points[0])
+    return filePathListCutted
+}
+
+def demoSubmitJob(filePathList, dbName, tbName, deptName="facplf$public"){
+    dlid = rand(uuid(), 1)[0]
+    dateList_ = demoRenderDateList(filePathList)
+    startDate_ = first(dateList_)
+    endDate_ = last(dateList_)
+    createTime = now()
+    user = getCurrentSessionAndUser()[1]
+    jobDes= user + " "+ deptName + " "+string(now())
+    jobId = user + "_" + concat((string(now()).regexReplace(":", "")).split("."), "_") + "_" + string(dlid).regexReplace("-", "_")
+    jobId = submitJob(jobId, jobDes, demoLoadFiles{filePathList, dbName, tbName})
+}

@@ -1,0 +1,604 @@
+/////////////
+///因子草稿///
+/////////////
+// 获取因子草稿列表
+/**
+ * @return {
+    items: FactorDraft[
+        factor_id: 因子id, fid字段
+        name: 因子名称, factorName字段
+        properties: FactorProperty
+        tags: 标签
+        comment: 备注
+        run_record_count: 运行记录数
+        analysis_record_count: 评价记录数
+        create_time: 创建时间, createTime字段
+        update_time: 更新时间, lastModified字段
+        creator: 创建者, user字段
+    ];
+    total: number;
+ }
+ */
+def facplf_get_factor_list() {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    test_info = loadTable("dfs://job_test_info", "test_info")
+    analysis_info = loadTable("dfs://analysis_run_info", "run_info")
+
+    //获取因子信息
+    fac_tb_display = select * from draft_info where username = user context by fid limit -1
+    fac_tb_display = select * from fac_tb_display where isDeleted = false
+    fids = fac_tb_display["fid"]
+
+    // 测试记录
+    test_tb = select fid, jobId, isDeleted from test_info where username = user and fid in fids context by jobId limit -1
+    test_tb = select fid, jobId as test_id from test_tb where isDeleted = false
+    test_ids = test_tb["test_id"]
+
+    // 评价记录
+    analysis_tb = select testJid, jobId, isDeleted from analysis_info where username = user and testJid in test_ids context by jobId limit -1
+    analysis_tb = select testJid, jobId from analysis_tb where isDeleted = false
+
+    // 所有运行记录统计
+    run_test_tb = select fid, count(test_id) as run_record_count from test_tb group by fid
+    run_analysis_tb = select l.fid, count(r.jobId) as analysis_record_count from test_tb l left join analysis_tb r on l.test_id = r.testJid group by fid
+    run_tb = select * from run_test_tb l left join run_analysis_tb r on l.fid = r.fid
+
+    // 最终展示信息
+    fac_tb = select l.fid as factor_id, l.funcs.split(",") as func_list, l.factorName as name, l.properties as properties, l.tags as tags, l.comment as comment, r.run_record_count, r.analysis_record_count, l.createTime as create_time, l.lastModified as update_time, l.username as creator from fac_tb_display l left join run_tb r on l.fid = r.fid order by create_time desc
+    
+    update fac_tb set run_record_count = run_record_count.nullFill(0)
+    update fac_tb set analysis_record_count = analysis_record_count.nullFill(0)
+
+    res = dict(STRING, ANY)
+    res["items"] = fac_tb
+    res["total"] = count(fac_tb)
+    
+    return res
+}
+
+
+// 因子草稿名称重复检测
+def facplf_duplicate_factor_name_check(param) {
+    public_factor_tb = loadTable("dfs://factor_public_info", "public_info")
+    fac_review_tb = loadTable("dfs://factor_review_info", "review_info")
+    existing_fac= select fid, factorName, isDeleted from public_factor_tb context by fid, deptName limit -1
+    user = getCurrentSessionAndUser()[1]
+
+    // 是否二次-前往review表中查询
+    if (typestr(param.factor_id) == "VOID") {
+        existing_name = exec factorName from existing_fac where isDeleted != true
+    } else {
+        // review_record = select * from fac_review_tb where string(draftFid) = param.factor_id
+        review_record = select fid, draftFid, factorName, status from fac_review_tb where username = user and draftFid = uuid(param.factor_id) order by draftFid, uploadTime desc
+        review_record = select * from review_record context by draftFid limit 1
+        review_record_name = select fid, factorName from review_record where status = 1
+        existing_name = exec factorName from existing_fac where factorName != review_record_name.factorName[0] and isDeleted != true
+    }
+
+    tmp_dict = dict(STRING, ANY)
+    if (param.name in existing_name) {
+        tmp_dict["is_duplicate"] = true
+    } else {
+        tmp_dict["is_duplicate"] = false
+    }
+    return tmp_dict
+}
+
+
+// 新建因子草稿
+def facplf_create_new_factor(param) {
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    user = getCurrentSessionAndUser()[1]
+
+    //重名检查
+    user_tb = select factorName, isDeleted from draft_info where username = user context by fid limit -1
+    user_tb = select factorName from user_tb where isDeleted = false and factorName = param.name
+    if (count(user_tb) != 0) {throw toStdJson({code: "S014"})}
+
+    // demo
+    firstline = "module " + param.name
+    demo_code = (exec factorCode from draft_info where username = "DolphinDB" and factorName = "demo" context by fid limit -1)[0]
+    code = firstline + "\n" + string(demo_code)
+    
+    // 试运行
+    try {
+        loadModuleFromScript([param.name], [code], true)
+    } catch(ex) {
+        throw toStdJson({code:"S047"})
+    }
+
+    // 运行成功,获取所有defs()
+    tmp_name = string(param.name)+"::%"
+    tmp_funcs = select name from defs() where name like tmp_name
+
+    // 去掉模板名字的所有函数名
+    funcs = select substr(name, strlen(param.name)+2, strlen(name)-strlen(param.name)-2) as name from tmp_funcs
+
+    tmp_properties = table(strip(param.properties.split(",")) as property)
+    tmp_properties = exec * from tmp_properties where property != NULL
+
+    // 标签
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 0)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    new_fid = rand(uuid(), 1)[0]
+    tb = table(new_fid as fid, param.name as factorName, user as username, code as factorCode, concat(funcs.name, ",") as funcs, now() as createTime, now() as lastModified, string(param.comment) as comment, concat(tmp_properties, ",") as properties, concat(tmp_tags, ",") as tags, false as isDeleted)
+    draft_info.append!(tb)
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict["factor_id"] = new_fid
+    return tmp_dict
+}
+
+// 删除因子草稿
+def facplf_delete_factor(param){
+    user = getCurrentSessionAndUser()[1]
+    fac_tb = loadTable("dfs://factor_draft_info", "draft_info")
+    review_tb = loadTable("dfs://factor_review_info", "review_info")
+
+    // 检查因子是否存在
+    existing_fid = select *  from fac_tb where username = user and fid = uuid(param.factor_id) context by fid limit -1
+    existing_fid = select * from existing_fid where isDeleted = false
+    if (count(existing_fid)==0) {throw toStdJson({code:"S013"})}
+
+    // 因子的名字
+    fac_name = last(exec factorName from existing_fid)
+
+    // 因子是否在审核中
+    reviewing_status = exec status from review_tb where factorName = fac_name and draftFid = uuid(param.factor_id) order by uploadTime desc limit 1
+    if (count(reviewing_status) != 0) {
+        if (reviewing_status == 0 or reviewing_status == 3) {
+            throw toStdJson({code:"S049"})
+        }
+    }
+
+    tb = table(uuid(param.factor_id) as fid, fac_name as factorName, user as username, string(NULL) as factorCode, string(NULL) as funcs, now() as createTime, now() as lastModified, string(NULL) as comment, string(NULL) as properties, string(NULL) as tags, true as isDeleted)
+    fac_tb.append!(tb)
+}
+
+// 批量删除因子
+def facplf_delete_factors(param) {
+    if (size(param.factors) != 0) {
+        for (fac in param.factors) {
+            tmp = dict(STRING, ANY)
+            tmp["factor_id"] = fac
+            facplf_delete_factor(tmp)
+        }
+    }
+}
+
+//编辑因子草稿
+def facplf_edit_factor(param) {
+    user = getCurrentSessionAndUser()[1]
+    fac_tb = loadTable("dfs://factor_draft_info", "draft_info")
+    review_tb = loadTable("dfs://factor_review_info", "review_info")
+
+    // 因子是否存在
+    existing_fid = select fid from fac_tb where username = user context by fid having sum(case when isDeleted = true then 1 else 0 end) = 0 limit -1
+    existing_fid = exec distinct fid from existing_fid
+    if (!(uuid(param.factor_id) in existing_fid)) {
+        throw toStdJson({code:"S013"})
+    }
+
+    // 因子是否在审核中
+    // 因子的名字
+    fac_name = exec factorName from fac_tb where fid = uuid(param.factor_id)
+    fac_name = fac_name[0]
+    // 因子是否在审核中
+    reviewing_status = exec status from review_tb where factorName = fac_name and string(draftFid) = param.factor_id order by uploadTime desc limit 1
+    if (reviewing_status[0] == 0 or reviewing_status[0] == 3) {
+        throw toStdJson({code:"S049"})
+    }
+
+    user_tb = select * from fac_tb where username = user and string(fid) = param.factor_id context by fid limit -1
+    prev_name = exec factorName from user_tb
+    prev_name = prev_name[0]
+
+    existing_tb = select factorName from fac_tb where username = user context by fid having sum(case when isDeleted = true then 1 else 0 end) = 0 limit -1
+    existing_names = exec distinct factorName from existing_tb where factorName != prev_name
+    if (param.name in existing_names) {
+        throw toStdJson({code: "S014"})
+    }
+
+    tmp_properties = table(strip(param.properties.split(",")) as property)
+    tmp_properties = exec * from tmp_properties where property != NULL
+
+    //存入标签
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 0)}catch(ex) {throw toStdJson({code:"S090"})}
+    
+    // 因子改名的时候，一并修改代码中的module factor\n
+    prev_code = user_tb.factorCode[0]
+    prev_code_funcs = concat(prev_code.split("\n")[1:], "\n")
+    new_code_first_line = "module " + param.name
+
+    tb = table(uuid(param.factor_id) as fid, param.name as factorName, user as username, new_code_first_line + "\n" + prev_code_funcs as factorCode, user_tb.funcs as funcs, user_tb.createTime as createTime, now() as lastModified, string(param.comment) as comment, concat(tmp_properties, ",") as properties, concat(tmp_tags, ",") as tags, false as isDeleted)
+    fac_tb.append!(tb)
+    
+
+    
+}
+
+// 保存因子草稿代码
+def facplf_save_factor_code(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+
+    factor_id = uuid(param.factor_id)
+    fac_tb = select * from draft_info where username = user and fid = factor_id context by fid limit -1
+    fac_tb = select * from fac_tb where isDeleted = false
+
+    // 存在检查
+    if (count(fac_tb) == 0) {throw toStdJson({code:"S013"})}
+
+    // 代码不能为空
+    if (param.code == NULL) {throw toStdJson({code:"S028"})}
+
+    // 获取因子模块名称
+    fac_name = fac_tb.factorName[0]
+    firstline = "module " + fac_name
+    code = firstline + "\n" + param.code
+
+    // 与上次代码不同再进行存表
+    if (!eq(fac_tb["factorCode"][0], code)) {
+        // 试运行
+        try {
+            loadModuleFromScript(fac_name, code, true)
+        } catch(ex) {throw toStdJson(dict(`code`variables,["S047", ex[0]+": "+ex[1]]))}
+
+        // 运行成功,获取所有defs()
+        tmp_name = string(fac_name)+"::%"
+        tmp_funcs = exec name from defs() where name like tmp_name
+        fac_funcs = concat(tmp_funcs.split("::")[1], ",")
+
+        update fac_tb set factorCode = blob(code), funcs = fac_funcs, lastModified = now()
+
+        draft_info.append!(fac_tb)
+    }
+}
+
+// helper function
+def facplf_parse_moduleCode(code) {
+    return concat(code.split("\n")[1:], "\n")
+}
+
+// 获取因子草稿详情 (single)
+def facplf_get_factor_detail(param) {
+    user = getCurrentSessionAndUser()[1]
+    user_tb = select * from loadTable("dfs://factor_draft_info", "draft_info") where username = user and fid = uuid(param.factor_id) context by fid limit -1
+    user_tb = select * from user_tb where isDeleted=false
+    tmpdict = dict(STRING, ANY)
+    tmpdict["factor_id"] = user_tb.fid[0]
+    tmpdict["func_list"] = user_tb.funcs[0].split(",")
+    tmpdict["name"] = user_tb.factorName[0]
+    tmpdict["properties"] = user_tb.properties[0]
+    tmpdict["comment"] = user_tb.comment[0]
+    tmpdict["tags"] = user_tb.tags[0]
+
+    task_tb = loadTable("dfs://job_test_info", "test_info")
+    analysis_tb = loadTable("dfs://analysis_run_info", "run_info")
+
+    fac_test = select * from task_tb where fid = uuid(param.factor_id) and username = user context by jobId limit -1
+    fac_test = select * from fac_test where isDeleted = false
+    testJid = select jobId from fac_test
+    test_cnt = count(select tid, fid from fac_test)
+
+    analysis_cnt = count(select aid from analysis_tb l inner join testJid r on l.testJid = r.jobId)
+
+    tmpdict["run_record_count"] = test_cnt
+    tmpdict["analysis_record_count"] = analysis_cnt
+
+    tmpdict["create_time"] = user_tb.createTime[0]
+    tmpdict["update_time"] = user_tb.lastModified[0]
+    tmpdict["creator"] = user_tb.username[0]
+    tmpdict["code"] = facplf_parse_moduleCode(user_tb.factorCode[0])
+
+    return tmpdict
+}
+
+// 获取因子草稿历史代码记录 (5 versions max)
+def facplf_get_factor_histories(param) {
+    user = getCurrentSessionAndUser()[1]
+    ord_user_tb = select lastModified as time, factorCode as code from loadTable("dfs://factor_draft_info", "draft_info") where username = user and fid = uuid(param.factor_id)
+    ord_user_tb = select time, code from ord_user_tb order by time desc limit 5
+    if (size(ord_user_tb) > 0) {
+        ord_user_tb = exec time, each(facplf_parse_moduleCode, code) as code from ord_user_tb
+    }
+    return ord_user_tb
+}
+
+
+// 因子运行结果详情
+def facplf_get_test_detail(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    test_tb = loadTable("dfs://job_test_info", "test_info")
+    analysis_tb = loadTable("dfs://analysis_run_info", "run_info")
+    
+    res = dict(STRING, ANY)
+
+    // 判断tid是否有效
+    existing_test = select jobId, isDeleted from test_tb where username = user order by tid, createTime desc 
+    existing_test = select jobId, isDeleted from existing_test context by jobId limit 1
+    existing_test = exec jobId from existing_test where isDeleted != true
+    
+    if (!(param.test_id in existing_test)) {
+        throw toStdJson({code:"S034"})// message: 该测试不存在
+    }
+
+    tid_tb = select * from test_tb where jobId = param.test_id and isDeleted = false
+    //factor_draft
+    test_fac = select * from draft_info where fid = tid_tb.fid[0] order by lastModified desc limit 1
+    test_fac = select * from test_fac where isDeleted = false
+    if (count(test_fac) == 0) {
+        //public_info
+        test_fac = select * from public_info where fid = tid_tb.fid[0] context by fid, deptName csort reviewTime desc limit 1
+        test_fac = select * from test_fac where isDeleted = false
+        if (count(test_fac) != 0) {
+            test_fac = select * from review_info where fid = tid_tb.fid[0] order by uploadTime desc limit 1
+        }
+    }
+    
+    res[`test_id] = param.test_id
+    res[`factor_name] = tid_tb.funcName.split("::")[0][0]
+    res[`func_name] = tid_tb.funcName.split("::")[1][0]
+    res[`create_time] = tid_tb.createTime[0]
+    status = facplf_get_job_status(tid_tb.jobId[0], 1, tid_tb.clusterNode[0])
+    res[`status] = status
+    r_cnt = exec count(*) from analysis_tb where testJid = param.test_id
+    res[`report_count] = r_cnt
+    res[`source_code] = iif(count(test_fac["factorCode"][0])!=0, facplf_parse_moduleCode(test_fac["factorCode"][0]), string(NULL))
+    res[`params] = string(tid_tb.parameter[0])
+
+    if (status == 1) {
+        try {
+            result = rpc(tid_tb.clusterNode[0], getJobReturn, tid_tb.jobId[0])
+            res[`result] = select * from result limit 100
+        } catch(ex) {
+            res[`status] = -1
+            res[`failed_reason] = "Invalid result tables."
+            return res
+        }
+    } else {
+        res[`result] = []
+    }
+    
+    if (status == 0 or status == -3) {
+        res[`failed_reason] = rpc(tid_tb.clusterNode[0], getJobReturn, tid_tb.jobId[0])[1]
+    }
+    if (status == -1) {
+        res[`failed_reason] = rpc(tid_tb.clusterNode[0], getJobMessage, tid_tb.jobId[0])
+    } 
+    if (status == 1) {
+        res[`failed_reason] = string(NULL)
+    }
+
+    return res
+}
+
+// 因子运行结果列表
+def facplf_get_test_list(param) {
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    test_info = loadTable("dfs://job_test_info", "test_info")
+    analysis_info = loadTable("dfs://analysis_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    user = getCurrentSessionAndUser()[1]
+    
+    // 更新status_info状态
+    try{facplf_update_job_status()}catch(ex){}
+    
+    // test
+    factor_id = uuid(param.factor_id)
+    test_tb = select jobId, funcName, createTime, isDeleted from test_info where fid = factor_id and username = user context by jobId limit -1
+    test_tb = select * from test_tb where isDeleted = false
+    test_jobid = test_tb["jobId"]
+
+    // status
+    job_status = select jobId, endTime, errorMsg from status_info where jobType = 1 and jobId in test_jobid context by jobId limit -1
+    job_status["status"] = each(facplf_parse_job_status, job_status)
+    run_tb = select l.*, r.status from test_tb l inner join job_status r on l.jobId = r.jobId
+
+    // analysis
+    analysis_tb = select atid, testJid, isDeleted from analysis_info where testJid in test_jobid context by aid limit -1
+    analysis_tb = select testJid, count(atid) as report_count from analysis_tb where isDeleted = false group by testJid
+
+    res = select jobId as test_id, funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, createTime as create_time, status, r.report_count from run_tb l left join analysis_tb r on l.jobId = r.testJid order by create_time desc
+
+    return res
+}
+
+
+/////////////
+///模板草稿///
+/////////////
+
+// 获取私有因子模板列表
+def facplf_get_private_factor_template_list() {
+    user = getCurrentSessionAndUser()[1]
+    temp_table = loadTable("dfs://temp_draft_info", "draft_info")
+
+    temp_table_display = select * from temp_table where username = user context by tempId limit -1
+    temp_table_display = select * from temp_table_display where isDeleted = false
+
+    tmp = select tempId as template_id, tempName as name, factorCat as factor_properties, tags as tags, comment as comment, createTime as create_time, lastModified as update_time, user as creator from temp_table_display order by create_time desc
+    n_items = exec count(template_id) from tmp
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict["items"] = tmp
+    tmp_dict["total"] = n_items
+
+    return tmp_dict
+}
+
+// 新建私有因子模板
+def facplf_create_new_private_factor_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+    // 与现有 DolphinDB 内置函数进行重名检查
+    if (count(defs(param.name)) != 0 && defs(param.name).userDefined[0] == false) {
+        throw toStdJson(dict(`code`variables, ["S091", param.name]))
+    }
+    // 检查是否存在同名模板
+    user_tb = select * from draft_info where username = user context by tempId limit -1
+    user_tb = select * from user_tb where isDeleted = false and tempName = param.name
+    if (count(user_tb)!=0) {throw toStdJson({code: "S019"})}
+
+    // demo
+    template_code = (exec tempCode from draft_info where username = "DolphinDB" and tempName = "demo" context by tempId limit -1)[0]
+    // 修改code中的函数名
+    new_code = facplf_edit_code(template_code, 'demo', param.name)
+
+    tmp_properties = table(strip(param.factor_properties.split(",")) as factorCat)
+    tmp_properties = exec * from tmp_properties where factorCat != NULL
+
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 1)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    new_template_id = rand(uuid(), 1)[0]
+    tb = table(new_template_id as tempId, param.name as tempName, user as username, 0 as tempCat, new_code as tempCode, now() as createTime, now() as lastModified, concat(tmp_properties, ",") as factorCat, string(param.comment) as comment, concat(tmp_tags, ",") as tags, false as isDeleted)
+    loadTable("dfs://temp_draft_info", "draft_info").append!(tb)
+
+    // 返回template_id
+    tmpdict = dict(STRING, ANY)
+    tmpdict["template_id"] = new_template_id
+    return tmpdict
+}
+
+// 因子模板草稿存在检查
+def facplf_check_private_factor_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+
+    id = uuid(param.template_id)
+    temp_tb = select * from draft_info where username = user and tempId = id context by tempId limit -1
+    temp_tb = select * from temp_tb where isDeleted = false
+
+    if(count(temp_tb)==0){throw toStdJson({code:"S018"})}
+
+    return table(temp_tb)
+}
+
+// 编辑因子模板草稿元信息
+def facplf_edit_private_factor_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+    
+    // 存在检查
+    temp_tb = facplf_check_private_factor_template(param)
+
+    // 新名称重名检查
+    if(param.name != temp_tb["tempName"][0]) {
+        all_temp = select tempId, tempName, isDeleted from draft_info where username = user context by tempId limit -1
+        tempNames = exec tempName from all_temp where isDeleted = false and tempId != uuid(param.template_id)
+        if (param.name in tempNames) {
+            throw toStdJson({code: "S019"})
+        }
+    }
+    // 取出code, 修改函数名
+    new_code = facplf_edit_code(temp_tb.tempCode[0], temp_tb.tempName[0], param.name)
+    update temp_tb set tempCode = new_code
+    // 改为新名称(需要在修改主函数名之后再修改)
+    update temp_tb set tempName = param.name
+    // 新属性
+    properties = exec factorCat from table(strip(param.factor_properties.split(",")) as factorCat) where factorCat != NULL
+    properties = concat(properties, ",")
+    update temp_tb set factorCat = properties
+
+    
+    // 存入新标签
+    tags = exec tag from table(strip(param.tags.split(",")) as tag) where tag != NULL
+    try{facplf_save_tag(tags, 1)}catch(ex) {throw toStdJson({code:"S090"})}
+    new_tags = concat(tags, ",")
+    update temp_tb set tags = new_tags
+
+    // 写入
+    update temp_tb set comment = param.comment, lastModified = now()
+    draft_info.append!(temp_tb)
+}
+
+// 删除私有因子模板
+def facplf_delete_private_factor_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    temp_table = loadTable("dfs://temp_draft_info", "draft_info")
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+
+    // 检查模板是否存在
+    temp_tb = facplf_check_private_factor_template(param)
+
+    // 模板的名字
+    temp_name = temp_tb["tempName"][0]
+    id = uuid(param.template_id)
+
+    // 检查该模板是否在审核中
+    reviewing_status = exec status from review_info where tempName = temp_name and draftId = id context by reviewId limit -1
+    if (any(reviewing_status in [0,3])) {throw toStdJson({code:"S049"})}
+
+
+    // 删除
+    update temp_tb set tempCode = string(NULL), lastModified = now(), isDeleted = true, factorCat = string(NULL), comment = string(NULL), tags = string(NULL)
+    temp_table.append!(temp_tb)
+}
+
+// 批量删除私有因子模板
+def facplf_delete_private_factor_templates(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    ids = uuid(param.templates)
+
+    all_temps = select * from draft_info where username = user and tempId in ids context by tempId limit -1
+    all_temps = select * from all_temps where isDeleted = false
+
+    all_names = all_temps["tempName"]
+    // 检查该模板是否在审核中
+    review_temps = select tempName, status from review_info where tempName in all_names and draftId in ids context by reviewId limit -1
+    if(any(review_temps["status"] in [0,3])) {throw toStdJson({code:"S049"})}
+
+    // 删除
+    update all_temps set tempCode = string(NULL), lastModified = now(), isDeleted = true, factorCat = string(NULL), comment = string(NULL), tags = string(NULL)
+    draft_info.append!(all_temps)
+
+}
+
+// 获取私有因子模板详情
+def facplf_get_private_factor_template_detail(param) {
+    // 存在检查
+    temp_tb = facplf_check_private_factor_template(param)
+
+    // 数据返回
+    res = select tempId as `template_id, tempName as `name, factorCat as `factor_properties, tags, comment, createTime as `create_time, lastModified as `update_time, username as `creator, string(tempCode[0]) as `code from temp_tb
+
+    return res[0]
+}
+
+// 获取私有因子模板历史记录（5 versions max）
+def facplf_get_private_factor_template_histories(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+    id = uuid(param.template_id)
+
+    ord_user_tb = select lastModified as time, string(tempCode) as code from draft_info where username = user and tempId = id
+    ord_user_tb = exec time, code from ord_user_tb order by time desc limit 5
+    return ord_user_tb
+}
+
+// 保存私有因子模板代码
+def facplf_save_private_factor_template_code(param) {
+    user = getCurrentSessionAndUser()[1]
+    temp_table = loadTable("dfs://temp_draft_info", "draft_info")
+
+    //存在检查
+    user_tb = facplf_check_private_factor_template(param)
+    // 获取用户因子模块代码
+    library_all = select factorName as moduleName, factorCode as code from facplf_find_available_factors(0)
+    // 代码校验(不需要返回参数)
+    facplf_code_check_run_clear_cache(param.code, library_all, user_tb.tempName[0])
+    //写入
+    update user_tb set tempCode = blob(param.code), lastModified = now()
+    temp_table.append!(user_tb)
+}

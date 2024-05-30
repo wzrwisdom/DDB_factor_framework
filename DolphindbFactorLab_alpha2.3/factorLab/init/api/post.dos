@@ -1,0 +1,684 @@
+//消息通知
+def facplf_send_msg(sender, receiver, msgType, reviewId, rvType){
+    message_info = loadTable("dfs://plf_message_info", "message_info")
+    message_info.tableInsert(
+        table(
+            rand(uuid(),1) as `messageId,
+            sender as `sender,
+            receiver as `receiver,
+            msgType as `msgType,
+            now() as `sendTime,
+            reviewId as `reviewId,
+            rvType as `rvType,
+            false as `isRead
+            )
+        )
+}
+
+////////////////////
+///部门公开 - 因子///
+////////////////////
+
+//获取因子草稿上一次发布记录
+def facplf_get_factor_post(param){
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+
+    //仅返回已公开因子
+    fac_lastest = select fid, isEncrypted from review_info where draftFid = uuid(param.factor_id) and factorName = param.factor_name context by factorName limit -1
+    approved = select * from public_info where fid = fac_lastest.fid[0] context by deptName limit -1
+    approved = exec deptName from approved where isDeleted = false
+
+    //无则返回NULL
+    if (approved.count() == 0){return NULL}
+
+    res = dict(STRING, ANY)
+    res["scope"] = approved
+    res["is_encrypt"] = fac_lastest.isEncrypted[0]
+    return res
+}
+
+// 因子评价列表
+def facplf_get_factor_analysis_report_list(param) {
+    user = getCurrentSessionAndUser()[1]
+    factor_tb = loadTable("dfs://factor_draft_info", "draft_info")
+    test_info_tb = loadTable("dfs://job_test_info", "test_info")
+    analysis_info_tb = loadTable("dfs://analysis_run_info", "run_info")
+
+    // 两个参数均为空/均不为空
+    if (param.factor_id == NULL and param.test_id == NULL) {
+        throw toStdJson({code: "S022"})
+    }
+    if (param.factor_id != NULL and param.test_id != NULL) {
+        throw toStdJson({code: "S022"})
+    }
+
+    // factor_id -> tid -> aid
+    if (param.factor_id != NULL) {
+        // 最新一次更改代码之后
+        // lastest_modified_time = exec lastModified from factor_tb where username = user and string(fid) = param.factor_id and isDuplicated(factorCode, FIRST)==false order by lastModified desc limit 1
+        // lastest_modified_time = lastest_modified_time[0]
+
+        // user_test_id = exec distinct tid, jobId from test_info_tb where username = user and string(fid) = param.factor_id and createTime >= lastest_modified_time
+        user_test_id = exec distinct tid, jobId from test_info_tb where username = user and fid = uuid(param.factor_id)
+
+        // 如果没有对应的jobId
+        tmp_user_analysis = select aid as analysis_id, createTime as create_time, funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, jobId, clusterNode from analysis_info_tb where username = user and testJid in user_test_id.jobId
+        if (size(tmp_user_analysis) != 0) {
+            user_analysis = select aid as analysis_id, createTime as create_time, funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, each(facplf_get_job_status{,2,}, jobId, clusterNode) as status from analysis_info_tb where username = user and testJid in user_test_id.jobId order by create_time desc
+        } else {
+            user_analysis = select aid as analysis_id, createTime as create_time, funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, int(NULL) as status from analysis_info_tb where username = user and testJid in user_test_id.jobId order by create_time desc
+        }
+        return user_analysis
+    }
+
+    // tid -> aid
+    if (param.test_id != NULL) {
+        // 如果没有对应的jobId
+        user_test = select tid, jobId from test_info_tb where username = user and string(jobId) = param.test_id
+        
+        tmp_user_analysis = select aid as analysis_id, createTime as create_time, funcName.split("::")[0] as factor_name, jobId from analysis_info_tb where username = user and string(testJid) in user_test.jobId
+
+        if (size(tmp_user_analysis) != 0) {
+            user_analysis = select aid as analysis_id, createTime as create_time, funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, each(facplf_get_job_status{,2,}, jobId, clusterNode) as status from analysis_info_tb where username = user and testJid in user_test.jobId order by create_time desc
+        } else {
+            user_analysis = select aid as analysis_id, createTime as create_time, funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, int(NULL) as status from analysis_info_tb where username = user and string(testJid) in user_test.jobId order by create_time desc
+        }
+        return user_analysis
+    }
+}
+
+//发布因子草稿
+def facplf_post_factor(param){
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    user = getCurrentSessionAndUser()[1]
+
+    //二次发布：部门参数判断
+    republish = facplf_get_factor_post(param)
+    if (typestr(republish) != "VOID"){
+        nowdept = each(x->x.department, param.reviews)
+        checkdpt = (republish.scope) in nowdept
+        if(false in checkdpt){
+            throw toStdJson({code: 'S048', message: '部门选择错误' })
+        }
+    }
+
+    //判断因子是否存在于review_info
+    rv = select * from review_info where factorName = param.factor_name and draftFid = uuid(param.factor_id) context by reviewDept limit -1
+    //不存在则新建fid，存在则用之前的fid
+    if(rv.size() == 0){
+        new_fid = rand(uuid(),1)
+    } else {
+        new_fid = rv.fid[0]
+    }
+
+    //判断该module是否存在于public_info
+    md = select * from public_info where factorName = param.factor_name context by fid,deptName	limit -1
+    md = select * from md where isDeleted = false
+    if (md.count() != 0){
+        // 1.非原始作者发布
+        // 2.作者发布之后, 删除原有因子之后再新建相同名称因子之后再发布
+        if(md.username[0] != user || rv.size() == 0){
+            throw toStdJson({code: 'S046'})
+        }
+    }
+
+    //未审核的状态的因子都改为已撤回
+    withdraw = select * from rv where status = 0
+    if (withdraw.size() != 0){
+        update withdraw set status = 2, factorCode = string(NULL)
+        review_info.append!(withdraw)
+        for (wd in withdraw){
+            facplf_send_msg(user, wd.reviewer, 4, wd.reviewId, "factor")
+            }
+        }
+
+    //写入记录
+    //获取username, draft_info
+    factor = select * from draft_info where factorName = param.factor_name and fid = uuid(param.factor_id) context by factorName limit -1
+    if(factor.size() == 0){
+        throw toStdJson({code: 'S013', message: '因子草稿不存在' })}
+
+    //analysisId存为一个string
+    if((param.report_ids).count() != 0){reports = concat(param.report_ids, ",")} else{
+        reports = string(NULL)
+    }
+
+    //部门需分条写入
+    for (i in param.reviews){
+        if (i.reviewers.count() == 0) {
+            throw toStdJson({ code: 'S020'})}
+        reviewId = rand(uuid(),1)
+
+        for (er in i.reviewers){
+            try{
+            review_info.tableInsert(
+                table(
+                    reviewId as `reviewId,
+                    new_fid as `fid,
+                    uuid(param.factor_id) as `draftFid,
+                    param.factor_name as `factorName,
+                    factor.username as `username,
+                    factor.comment as `comment,
+                    reports as `analysisId,
+                    user as `submitter,
+                    0 as `status,
+                    er as `reviewer,
+                    i.department as `reviewDept,
+                    now() as `uploadTime,
+                    param.note as `note,
+                    param.encrypt as `isEncrypted,
+                    factor.properties as `properties,
+                    factor.funcs as `funcs,
+                    factor.tags as `tags,
+                    factor.factorCode as `factorCode)
+                )
+            }catch(ex){throw ex}
+            facplf_send_msg(user, er, 1, reviewId, "factor")
+
+        }
+    }
+}
+
+//批量发布因子草稿
+def facplf_post_multi_factors(param){
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    user = getCurrentSessionAndUser()[1]
+    
+    //重名检查
+    facnames = []
+    for (p in param.publish){
+        for (f in p.factors){
+            facnames.append!(f.factor_name)
+        }
+    }
+    md = select * from public_info where factorName in facnames context by fid, deptName limit -1
+    md = select * from md where isDeleted = false
+    md = select * from md where username != user
+    if (md.count() != 0){
+        dpname = exec distinct factorName from md
+        errors = {code: 'S050'}
+        errors["variables"] = concat(dpname, ", ")
+        throw toStdJson(errors)
+    }
+    
+    for (i in param.publish){
+        for (fac in i.factors){
+            facPost = dict(STRING,ANY)
+            facPost["factor_id"] = fac.factor_id
+            facPost["factor_name"] = fac.factor_name
+            facPost["report_ids"] = fac.report_ids
+            facPost["encrypt"] = i.encrypt
+            facPost["reviews"] = i.reviews
+            facPost["note"] = i.note
+            
+            facplf_post_factor(facPost)
+        }
+    }
+}
+
+//批量获取因子草稿上一次发布记录
+def facplf_get_factor_multi_post(param){
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+
+    res = dict(STRING, ANY)
+    first_publish = dict(STRING, ANY)
+    re_publish = dict(STRING, ANY)
+    ffac = []
+    sfac = []
+
+    for (i in param.factors){
+        pr = facplf_get_factor_post(i)
+        if(typestr(pr) != "VOID"){
+            f = i
+            f["scope"] = pr["scope"]
+            f["is_encrypt"] = pr["is_encrypt"]
+            sfac.append!(f)
+        }else{
+            ffac.append!(i)
+        }
+    }
+
+    first_publish["factors"] = ffac
+    first_publish["total"] = ffac.count()
+
+    re_publish["factors"] = sfac
+    re_publish["total"] = sfac.count()
+
+    res["first_publish"] = first_publish
+    res["re_publish"] = re_publish
+
+    return res
+}
+
+
+////////////////////
+///系统公开 - 模板///
+////////////////////
+
+// 获取公开因子模板列表
+def facplf_get_public_factor_template_list(param) {
+    public_template_tb = loadTable("dfs://temp_public_info", "public_info")
+    review_info_tb = loadTable("dfs://temp_review_info", "review_info")
+    dept_info_tb = loadTable("dfs://mgmt_dept_info", "dept_info")
+    user = getCurrentSessionAndUser()[1]
+
+    // NULL，展示权限内所有
+    if (typestr(param.department) == "VOID") {
+        // admin
+        if (user == "admin") {
+            // 针对每个tempId
+            tb_f = select * from public_template_tb order by tempId, deptName, reviewTime desc
+        } else {
+            // 权限部门
+            dept = exec distinct deptName from dept_info_tb where username = user
+            // 系统+部门
+            tb_f = select * from public_template_tb where deptName = 'facplf$public' or deptName in dept order by tempId, deptName, reviewTime desc
+        }
+
+        tb_f = select * from tb_f context by tempId, deptName limit 1
+        tb_f = select tempId as template_id, tempName as name, tempCode as code, factorCat as factor_properties, tags as tags, comment as comment, iif(deptName == 'facplf$public', 'system', 'department') as public_level, reviewTime as publish_time, username as creator, iif(deptName=='facplf$public', false, true) as is_custom from tb_f where isDeleted != true order by template_id, public_level desc, publish_time desc
+        // 对每个fid,取更高级或同级别更新的一条
+        tb_f = select * from tb_f context by template_id limit 1
+
+        tmp = select * from tb_f order by publish_time desc
+        total = exec count(*) from tmp
+        tmp_dict = dict(STRING, ANY)
+        tmp_dict["items"] = tmp
+        tmp_dict["total"] = total
+
+        return tmp_dict
+    } else {
+        // 只展示选择的部门
+        tb_f = select * from public_template_tb where deptName in param.department order by tempId, reviewTime desc
+        tb_f = select * from tb_f context by tempId, deptName limit 1
+        tb_f = select tempId as template_id, tempName as name, tempCode as code, factorCat as factor_properties, tags as tags, comment as comment, iif(deptName == 'facplf$public', 'system', 'department') as public_level, reviewTime as publish_time, username as creator, iif(deptName=='facplf$public', false, true) as is_custom from tb_f where isDeleted != true order by template_id, public_level desc, publish_time desc
+        // 对每个fid,取更高级或同级别更新的一条
+        tb_f = select * from tb_f context by template_id limit 1
+
+        tmp = select * from tb_f order by publish_time desc
+        total = exec count(*) from tmp
+        tmp_dict = dict(STRING, ANY)
+        tmp_dict["items"] = tmp
+        tmp_dict["total"] = total
+
+        return tmp_dict
+    }
+
+}
+
+// 删除公开因子模板
+def facplf_delete_public_factor_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    public_template_tb = loadTable("dfs://temp_public_info", "public_info")
+    mgmt_dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+    mgmt_user_info = loadTable("dfs://mgmt_user_info", "user_info")
+
+    // review_info_tb = loadTable("dfs://temp_review_info", "review_info")
+    
+    // 权限识别
+    // 系统权限
+    if (param.department == "facplf$public") {
+        tmp_access = select isReviewer, isDeleted from mgmt_user_info where username = user order by activateTime desc limit 1
+        tmp_access = exec isReviewer from tmp_access where isDeleted != true
+        if (tmp_access[0] == NULL or tmp_access[0] == false) {
+            throw toStdJson({code:"S001"})
+        }
+    } else {
+        // 部门匹配
+        tmp_access = exec isDeptReviewer from mgmt_dept_info where username = user and deptName = param.department context by username, deptName limit -1
+        if (tmp_access[0] == NULL or tmp_access[0] == false) {
+            throw toStdJson({code:"S001"})
+        }
+    }
+    
+    // 检查因子模板id是否存在
+    existing_temp = select * from public_template_tb where deptName = param.department order by tempId, reviewTime desc
+    existing_temp = select tempId, isDeleted from existing_temp context by tempId limit 1
+    existing_temp = exec tempId from existing_temp where isDeleted != true
+    if (!(uuid(param.template_id) in existing_temp)) {
+        throw toStdJson({code:"S030"})
+    }
+
+    // 删除对应部门的因子
+    prev_dept = param.department
+    tb = table(uuid(param.template_id) as tempId, string(NULL) as tempName, string(NULL) as username, int(NULL) as tempCat, string(NULL) as comment, prev_dept as deptName, string(NULL) as reviewer, now() as reviewTime, string(NULL) as factorCat, string(NULL) as tags, string(NULL) as tempCode, true as isDeleted, user as remover)
+
+    public_template_tb.append!(tb)
+}
+
+// 公开模板到系统
+def facplf_publish_temp(param){
+    //仅部门admin或者部门reviewer可以公开
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+    user = getCurrentSessionAndUser()[1]
+
+    // dept public
+    id = uuid(param.template_id)
+    pb = select * from public_info where tempId = id and deptName != "facplf$public" context by deptName limit -1
+    if (pb.count() == 0){throw toStdJson({code: 'S030'})}
+
+    // review_info
+    rv = select * from review_info where tempId = id context by reviewId, reviewDept limit -1
+    //未审核的状态的因子都改为已撤回
+    withdraw = select * from rv where status = 0
+    if (withdraw.size() != 0){
+        update withdraw set status = 2, tempCode = blob(string(NULL))
+        review_info.append!(withdraw)
+        for (wd in withdraw){
+            facplf_send_msg(user, wd.reviewer, 4, wd.reviewId, "template")
+        }
+    }
+
+    rv = select * from rv where status = 1 context by tempId limit -1
+
+    //写入
+    n = count(param.reviewers)//n=2
+    reviewId = rand(uuid(), 1)[0]
+    rv_tb = table(
+        take(reviewId, n) as `reviewId,
+        take(rv.tempId, n) as `tempId,
+        take(rv.draftId, n) as `draftId,
+        take(rv.tempName, n) as `tempName,
+        take(rv.username, n) as `username,
+        take(rv.tempCat, n) as `tempCat,
+        take(rv.comment, n) as `comment,
+        take(user, n) as `submitter,
+        take(0, n) as `status,
+        param.reviewers as `reviewer,
+        take("facplf$public", n) as `reviewDept,
+        take(now(), n) as `uploadTime,
+        take(rv.factorCat, n) as `factorCat,
+        take(rv.tags, n) as `tags,
+        take(string(param.note), n) as `note,
+        take(rv.tempCode, n) as `tempCode
+    )
+    review_info.append!(rv_tb)
+    
+    //发送消息
+    each(facplf_send_msg, take(user,n), param.reviewers, take(1,n), take(reviewId, n), take("template", n))
+}
+
+////////////////////
+///部门公开 - 模板///
+////////////////////
+
+// 获取私有因子模板上一次发布记录
+def facplf_get_temp_post(param){
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+
+    //仅返回该tempName下，之前通过审批的部门名。
+    temp_lastest = exec tempId from review_info where draftId = uuid(param.template_id) and tempName = param.template_name context by tempName limit -1
+    approved = select * from public_info where tempId = temp_lastest[0] context by deptName limit -1
+    approved = exec deptName from approved where isDeleted = false
+    
+    //无则返回NULL
+    if (count(approved) == 0){return NULL}
+
+    res = dict(STRING, ANY)
+    res["scope"] = approved
+    return res
+}
+
+// 发布私有因子模板
+def facplf_post_temp(param){
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+    review_info = loadTable("dfs://temp_review_info", "review_info")
+    public_template_tb = loadTable("dfs://temp_public_info", "public_info")
+    user = getCurrentSessionAndUser()[1]
+    preName = select tempName, isDeleted from public_template_tb where username != user context by tempId, deptName limit -1
+    havedName = exec tempName from preName where isDeleted = false
+    if (param.template_name in havedName) {
+        throw toStdJson({code: 'S101'})// message: '该因子计算模板名称与已有公开计算模板名称重复'
+    }
+
+    //二次发布：部门参数判断
+    republish = facplf_get_temp_post(param)
+    if (!isVoid(republish)){
+        nowdept = each(x->x.department, param.reviews)
+        checkdpt = (republish.scope) in nowdept
+        if(false in checkdpt){
+            throw toStdJson({code: 'S048', message: '部门选择错误' })
+        }
+    }
+
+    //判断模板是否存在于review_info
+    rv = select * from review_info where tempName = param.template_name and draftId = uuid(param.template_id) context by reviewDept limit -1
+
+    //不存在则新建fid，存在则用之前的fid
+    if (rv.size() == 0){
+        new_fid = rand(uuid(),1);
+    } else {
+        new_fid = rv.tempId[0]
+    }
+
+    //未审核的状态的模板都改为已撤回
+    withdraw = select * from rv where status = 0
+    if (withdraw.size() != 0){
+        update withdraw set status = 2, tempCode = string(NULL)
+        review_info.append!(withdraw)
+        for (wd in withdraw){
+            facplf_send_msg(user, wd.reviewer, 4, wd.reviewId, "template")
+        }
+    }
+
+    //写入记录
+    //获取username, draft_info
+    template = select * from draft_info where tempName = param.template_name and tempId = uuid(param.template_id) and isDeleted = false context by tempName limit -1
+    if(template.size() == 0){
+        throw toStdJson({code: 'S018'})// message: 因子模板草稿不存在
+    }
+
+    //部门需分条写入
+    for (i in param.reviews){//i = param.reviews[0]
+        if (i.reviewers.count() != 0) {
+            reviewers = concat(i.reviewers, ",")
+        }else{
+        throw toStdJson({ code: 'S020'})// message:部门审核员不存在
+        }
+
+        reviewId = rand(uuid(),1)
+        for (er in i.reviewers){//er = i.reviewers[0]
+            try{
+                review_info.tableInsert(
+                    table(
+                        reviewId as `reviewId,
+                        new_fid as `tempId,
+                        uuid(param.template_id) as `draftId,
+                        param.template_name as `tempName,
+                        template.username as `username,
+                        template.tempCat as `tempCat,
+                        template.comment as `comment,
+                        user as `submitter,
+                        0 as `status,
+                        er as `reviewer,
+                        i.department as `reviewDept,
+                        now() as `uploadTime,
+                        template.factorCat as `factorCat,
+                        template.tags as `tags,
+                        string(param.note) as `note,
+                        template.tempCode as `tempCode
+                    )
+                )
+            }catch(ex){
+                throw ex
+            }
+            facplf_send_msg(user, er, 1, reviewId, "template")
+        }
+    }
+}
+
+////////////////////
+///系统公开 - 因子///
+////////////////////
+
+// 获取公开因子列表
+def facplf_get_public_factor_list(param) {
+    public_factor_tb = loadTable("dfs://factor_public_info", "public_info")
+    review_info_tb = loadTable("dfs://factor_review_info", "review_info")
+    dept_info_tb = loadTable("dfs://mgmt_dept_info", "dept_info")
+    user = getCurrentSessionAndUser()[1]
+
+    // 权限验证
+    // admin, system reviewer
+    if (user == "admin") {
+        // 针对每个fid，找到最新review完的、未被删除的公开因子表记录
+        tb_f = select * from public_factor_tb context by fid, deptName csort reviewTime desc limit 1
+        tb_f = select * from tb_f where isDeleted = false
+    } else{
+        // 根据此人部门
+        dept = exec distinct deptName from dept_info_tb where username = user 
+        // 展示系统级别+相应部门下的因子
+        tb_f = select * from public_factor_tb where deptName = 'facplf$public' or deptName in dept context by fid, deptName csort reviewTime desc limit 1
+        tb_f = select * from tb_f where isDeleted = false
+    }
+    // NULL，展示权限内所有
+    if (typestr(param.department) == "VOID") {
+        public_tb = select * from tb_f where deptName = "facplf$public"
+        dept_tb = select * from tb_f where deptName != "facplf$public"
+   
+        tb_f = select fid as factor_id, factorName as name, properties, tags, comment, iif(deptName == 'facplf$public', 'system', 'department') as public_level, reviewTime as publish_time, username as creator from unionAll(public_tb, dept_tb) context by fid limit 1
+
+        // 审核表
+        // func_list: from the review_info$funcs
+        fid_display = exec factor_id from tb_f
+        // 查找状态为审批通过 or 二次发布保留之前记录 -> 只要有通过记录
+        tb_i1 = select * from review_info_tb where fid in fid_display and status = 1 order by fid, reviewDept, uploadTime desc
+        tb_i1 = select * from tb_i1 context by fid, reviewDept limit 1
+        tb_i2 = select fid as factor_id, funcs.split(",") as func_list, isEncrypted as encrypt, iif(isEncrypted == true, string(NULL), factorCode) as code from tb_i1 context by fid limit 1
+        
+        if (size(tb_i2) == 0) {
+            tb_i = select factor_id, func_list, encrypt, string(NULL) as code from tb_i2 context by factor_id limit 1
+        } else {
+            tb_i = select factor_id, func_list, encrypt, each(facplf_parse_moduleCode, code) as code from tb_i2 context by factor_id limit 1
+        }
+
+        // merge
+        tmp = select factor_id, func_list, name, properties, tags, comment, public_level, publish_time, creator, encrypt, code from tb_f inner join tb_i on tb_f.factor_id = tb_i.factor_id order by publish_time desc
+        total = exec count(*) from tmp
+        tmp_dict = dict(STRING, ANY)
+        tmp_dict["items"] = tmp
+        tmp_dict["total"] = total
+    
+        return tmp_dict
+    } else {
+        // 只展示选择的部门
+        // deparment users
+        tb_f = select * from tb_f where deptName in param.department context by fid csort reviewTime desc limit 1
+        tb_f = select * from tb_f where isDeleted = false
+        tb_f = select fid as factor_id, factorName as name, properties, tags, comment, iif(deptName == 'facplf$public', 'system', 'department') as public_level, reviewTime as publish_time, username as creator from tb_f where isDeleted != true
+        // 审批记录中最新一条已经通过的
+        tb_i1 = select * from review_info_tb where reviewDept in param.department and status = 1 order by fid, reviewDept, uploadTime desc
+        tb_i1 = select * from tb_i1 context by fid, reviewDept limit 1
+        tb_i2 = select fid as factor_id, funcs.split(",") as func_list, isEncrypted as encrypt, iif(isEncrypted == true, string(NULL), factorCode) as code from tb_i1 context by fid limit 1
+        
+        if (size(tb_i2) == 0) {
+            tb_i = select factor_id, func_list, encrypt, string(NULL) as code from tb_i2 context by factor_id limit 1
+        } else {
+            tb_i = select factor_id, func_list, encrypt, each(facplf_parse_moduleCode, code) as code from tb_i2 context by factor_id limit 1
+        }
+        
+        tmp = select factor_id, func_list, name, properties, tags, comment, public_level, publish_time, creator, encrypt, code from tb_f inner join tb_i on tb_f.factor_id = tb_i.factor_id order by publish_time desc
+        total = exec count(*) from tmp
+        tmp_dict = dict(STRING, ANY)
+        tmp_dict["items"] = tmp
+        tmp_dict["total"] = total
+
+        return tmp_dict
+    }
+}
+
+//公开因子到系统
+def facplf_publish_factor(param){
+    //仅部门reviewer可以公开
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    user = getCurrentSessionAndUser()[1]
+
+    id = uuid(param.factor_id)
+    // dept public
+    pb = select * from public_info where fid = id and deptName != "facplf$public" context by deptName limit -1
+    if (pb.count() == 0){throw toStdJson({code: 'S029'})}
+
+    // review_info
+    rv = select * from review_info where fid = id context by reviewId limit -1
+    //未审核的状态的因子都改为已撤回
+    withdraw = select * from rv where status = 0
+    if (withdraw.size() != 0){
+        update withdraw set status = 2, factorCode = blob(string(NULL))
+        review_info.append!(withdraw)
+        for (wd in withdraw){
+            facplf_send_msg(user, wd.reviewer, 4, wd.reviewId, "factor")
+        }
+    }
+
+    rv = select * from rv where status = 1 context by fid limit -1
+
+    //写入
+    reviewId = rand(uuid(), 1)
+    for (er in param.reviewers){//er = param.reviewers[0]
+        try{
+            new_review = table(
+                reviewId as `reviewId,
+                rv.fid[0] as `fid,
+                rv.draftFid[0] as `draftFid,
+                rv.factorName[0] as `factorName,
+                rv.username[0] as `username,
+                rv.comment[0] as `comment,
+                rv.analysisId[0] as `analysisId,
+                user as `submitter,
+                0 as `status,
+                er as `reviewer,
+                "facplf$public" as `reviewDept,
+                now() as `uploadTime,
+                param.note as `note,
+                rv.isEncrypted[0] as `isEncrypted,
+                rv.properties[0] as `properties,
+                rv.funcs[0] as `funcs,
+                rv.tags[0] as `tags,
+                rv.factorCode[0] as `factorCode
+            )
+            review_info.tableInsert(new_review)
+        }catch(ex){throw ex}
+        facplf_send_msg(user, er, 1, reviewId, "factor")
+    }
+}
+
+
+// 删除公开因子
+def facplf_delete_public_factor(param) {
+    user = getCurrentSessionAndUser()[1]
+    pub_fac_tb = loadTable("dfs://factor_public_info", "public_info")
+    mgmt_dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+    mgmt_user_info = loadTable("dfs://mgmt_user_info", "user_info")
+
+    // 权限识别
+    // 系统权限
+    if(user != "admin"){
+        if (param.department == "facplf$public") {
+            tmp_access = select isReviewer, isDeleted from mgmt_user_info where username = user order by activateTime desc limit 1
+            tmp_access = exec isReviewer from tmp_access where isDeleted != true
+            if ((tmp_access == NULL) or (tmp_access == false)) {throw toStdJson({code:"S001"})}
+        }else{
+            // 部门匹配
+            tmp_access = last(exec isDeptReviewer from mgmt_dept_info where deptName = param.department and username = user)
+            // Reviewer权限 - 相应department
+            if ((tmp_access == NULL) or (tmp_access == false)) {throw toStdJson({code:"S001"})}}
+    }
+
+    // 检查因子id是否存在
+    existing_fid = select fid from pub_fac_tb where deptName = param.department order by fid, reviewTime desc
+    existing_fid = exec fid from existing_fid context by fid limit 1
+    if (!(uuid(param.factor_id) in existing_fid)) {throw toStdJson({code:"S029"})}
+
+    // 删除对应部门的因子
+    // prev_dept = exec deptName from pub_fac_tb where string(fid) = param.factor_id context by fid limit -1
+    prev_dept = param.department
+    tb = table(uuid(param.factor_id) as fid, string(NULL) as factorName, string(NULL) as username, string(NULL) as comment, prev_dept as deptName, string(NULL) as reviewer, now() as reviewTime, string(NULL) as properties, string(NULL) as tags, string(NULL)  as funcs, true as isDeleted, user as remover)
+    pub_fac_tb.append!(tb)
+}
+

@@ -1,0 +1,499 @@
+grant("admin", DB_OWNER)
+dropFunctionView("facplf_get_all_backend_db")
+def facplf_get_all_backend_db(){
+    hidDB = ["dfs://mgmt_user_info", "dfs://mgmt_dept_info", "dfs://mgmt_dept_name", "dfs://mgmt_user_access", "dfs://factor_draft_info", "dfs://factor_review_info", "dfs://factor_public_info", "dfs://temp_draft_info", "dfs://temp_review_info", "dfs://temp_public_info", "dfs://plf_message_info", "dfs://preset_param_info", "dfs://preset_tag_info", "dfs://job_test_info", "dfs://workflow_job_list", "dfs://workflow_schedule_jobs", "dfs://workflow_run_info", "dfs://data_module_info", "dfs://data_template_info", "dfs://data_run_info", "dfs://job_status_info", "dfs://analysis_library_info", "dfs://analysis_template_info", "dfs://analysis_run_info", "dfs://job_analysis_info"]
+    return hidDB
+};go
+//addFunctionView(facplf_get_all_backend_db)
+//grant("platform_access", VIEW_EXEC, "facplf_get_all_backend_db")
+
+def createDB(dbName, partitionTypes, partitionSchemes){
+    if(count(partitionTypes)==1){
+        dbHandle = database(dbName, partitionTypes[0], partitionSchemes[0], , "TSDB")
+    } else{
+        db = array(ANY)
+        for (i in 0..(count(partitionTypes)-1)){
+            db.append!(database(, partitionTypes[i], partitionSchemes[i]))
+        }
+        dbHandle = database(dbName, COMPO, db, , "TSDB")
+    }
+    return dbHandle
+}
+
+def transform_dfs_tb(backupTB, newColName, newColType, tbSchemaName, dbName){// tbSchemaName = tbSchema["name"]
+    colMain = array(ANY)
+    for(i in 0..(count(newColName)-1)){//i = 
+        if(i <= count(tbSchemaName)-1){
+            colMain.append!(sqlColAlias(makeUnifiedCall(funcByName(newColType[i].lower()), sqlCol(tbSchemaName[i])), newColName[i]))
+        }else{
+            if(newColType[i] == "UUID"){
+                colMain.append!(sqlColAlias(<NULL>, newColName[i]))
+            } else {
+                colMain.append!(sqlColAlias(makeUnifiedCall(funcByName(newColType[i].lower()), NULL), newColName[i]))
+            }
+            
+        }
+    }
+    res = sql(select = colMain, from = backupTB).eval()
+    if(dbName == "dfs://job_status_info" ) {
+        update res set jobType = 0 where jobType = NULL
+    }
+    return res
+}
+
+def create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols, iskeepDuplicates = ALL) {
+    //最新的库表结构
+    tb = table(1:0, newColName, newColType)
+
+    //库检查
+    if (!(existsDatabase(dbName)&&existsTable(dbName, tbName))){
+        try{dropDatabase(dbName)}catch(ex){}
+        try{
+            dbHandle = createDB(dbName, partitionTypes, partitionSchemes)
+            dbHandle.createPartitionedTable(tb, tbName, partitionCols, ,sortCols, keepDuplicates = iskeepDuplicates)
+        }catch(ex){
+            try{dropDatabase(dbName)}catch(ex){}
+            print(dbName + "/" + tbName + "创建失败:" + ex[0] + "->" + ex[1])
+            print(dbName + "/" + tbName + "创建失败")
+            return NULL
+        }
+        print(dbName + "/" + tbName + "表创建成功")
+    }else{
+        //库表存在
+        db = database(dbName)
+
+        //结构检查
+        tbSchema = select name, typeString from loadTable(dbName, tbName).schema().colDefs
+        try{
+            eqSchema = all(eq(newColName, tbSchema["name"]))&&all(eq(newColType, tbSchema["typeString"]))
+        }catch(ex){eqSchema = false}
+
+        //分区类型检查
+        nowSchema = db.schema().partitionType
+        try{
+            eqPartition = all(eq(db.schema().partitionType, partitionTypes))
+        }catch(ex){eqPartition = false}
+        
+        //分区列检查
+        nowPartitionCols = schema(loadTable(dbName, tbName)).partitionColumnName
+        try{
+            eqPartitionCols = all(eq(nowPartitionCols, partitionCols))
+        }catch(ex){eqPartitionCols = false}
+
+        //排序列检查
+        nowSortCols = schema(loadTable(dbName, tbName)).sortColumns
+        try{
+            eqSortCols = all(eq(nowSortCols, sortCols))
+        }catch(ex){eqSortCols = false}
+
+        if(!(eqSchema&&eqPartition&&eqPartitionCols&&eqSortCols)){
+            //备份
+            backupDir = getHomeDir() + "/factorLab/backup"
+            backupDB(backupDir, dbName)
+            backupTB = select * from loadTable(dbName, tbName)
+
+            dropDatabase(dbName);
+            try{
+                dbHandle = createDB(dbName, partitionTypes, partitionSchemes)
+                dbHandle.createPartitionedTable(tb, tbName, partitionCols, ,sortCols, keepDuplicates = iskeepDuplicates)
+
+                newTB = transform_dfs_tb(backupTB, newColName, newColType, tbSchema["name"], dbName)
+                loadTable(dbName, tbName).append!(newTB)
+            }catch(ex){
+                try{dropDatabase(dbName)}catch(ex){};
+                restoreDB(backupDir, dbName);
+                try{rmdir(backupDir, recursive = true)}catch(ex){}
+                print(dbName + "/" + tbName + "更新失败: ",ex);
+                return NULL
+            }
+            try{rmdir(backupDir, recursive = true)}catch(ex){print(dbName + "/" + tbName + "删除备份失败")};
+            print(dbName + "/" + tbName + "表更新成功")
+        }
+    }
+}
+
+// 建表语句
+def create_mgmt_user_info() {
+    dbName = "dfs://mgmt_user_info"
+    tbName = "user_info"
+
+    newColName = ["username", "tokenId", "isImporter", "isReviewer", "activateTime", "isActivated", "isDeleted"]
+    newColType =  ["SYMBOL", "STRING", "BOOL", "BOOL", "TIMESTAMP","BOOL", "BOOL"]
+    partitionTypes = [VALUE]
+    partitionSchemes = [2023.11M..2023.12M]
+
+    partitionCols = "activateTime"
+    sortCols = `username`activateTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_mgmt_dept_info() {
+    dbName = "dfs://mgmt_dept_info"
+    tbName = "dept_info"
+
+    newColName = ["deptName", "username", "isDeptAdmin", "isDeptReviewer", "isDeptFacEditor", "isDeptImporter","isDeptStrategist"]
+    newColType = ["SYMBOL", "STRING", "BOOL", "BOOL", "BOOL", "BOOL", "BOOL"]
+    partitionTypes = [HASH]
+    partitionSchemes = [[STRING, 1]]
+
+    partitionCols = "deptName"
+    sortCols = "username"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_mgmt_dept_name() {
+    dbName = "dfs://mgmt_dept_name"
+    tbName = "dept_name"
+
+    newColName = ["deptName", "nickname", "createTime"]
+    newColType = ["SYMBOL", "STRING", "TIMESTAMP"]
+    partitionTypes = [VALUE]
+    partitionSchemes = [`dept1`dept2]
+
+    partitionCols = "deptName"
+    sortCols = "createTime"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_mgmt_user_access() {
+    dbName = "dfs://mgmt_user_access"
+    tbName = "user_access"
+
+    newColName = ["username", "deptName", "dbName", "tableName", "isDeleted"]
+    newColType = ["SYMBOL", "STRING", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE]
+    partitionSchemes = [["dept1", "dept2"]]
+
+    partitionCols = "deptName"
+    sortCols = "username"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_factor_draft_info() {
+    dbName = "dfs://factor_draft_info"
+    tbName = "draft_info"
+
+    newColName = ["fid", "factorName", "username", "factorCode","funcs", "createTime", "lastModified", "comment", "properties", "tags", "isDeleted"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "BLOB", "STRING", "TIMESTAMP", "TIMESTAMP", "STRING", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, ["user1", "user2"]]
+
+    partitionCols = `createTime`username
+    sortCols = "createTime"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_factor_review_info() {
+    dbName = "dfs://factor_review_info"
+    tbName = "review_info"
+
+    newColName = ["reviewId", "fid", "draftFid","factorName", "username", "comment", "analysisId", "submitter", "status", "reviewer", "reviewDept","uploadTime", "note", "isEncrypted", "properties", "funcs", "tags", "factorCode"]
+    newColType = ["UUID", "UUID", "UUID", "SYMBOL", "SYMBOL", "STRING", "STRING", "STRING", "INT", "STRING", "STRING","TIMESTAMP", "STRING", "BOOL", "STRING", "STRING", "STRING", "BLOB"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, ["dept1", "dept2"]]
+
+    partitionCols = `uploadTime`username
+    sortCols = "uploadTime"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_factor_public_info() {
+    dbName = "dfs://factor_public_info"
+    tbName = "public_info"
+
+    newColName =  ["fid", "factorName", "username", "comment" , "deptName", "reviewer", "reviewTime", "properties", "tags", "funcs", "isDeleted", "remover"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "STRING" , "STRING", "STRING", "TIMESTAMP", "STRING", "STRING", "STRING", "BOOL", "STRING"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, ["dept1", "dept2"]]
+
+    partitionCols = `reviewTime`deptName
+    sortCols = "reviewTime"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_temp_draft_info() {
+    dbName = "dfs://temp_draft_info"
+    tbName = "draft_info"
+
+    newColName =  ["tempId", "tempName", "username", "tempCat", "tempCode", "createTime", "lastModified", "factorCat", "comment", "tags", "isDeleted"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "INT", "BLOB", "TIMESTAMP", "TIMESTAMP", "STRING", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, ["user1", "user2"]]
+
+    partitionCols = `lastModified`username
+    sortCols = "lastModified"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_temp_review_info() {
+    dbName = "dfs://temp_review_info"
+    tbName = "review_info"
+
+    newColName =  ["reviewId", "tempId", "draftId", "tempName", "username", "tempCat", "comment",  "submitter", "status", "reviewer", "reviewDept", "uploadTime", "factorCat", "tags", "note", "tempCode"]
+    newColType = ["UUID", "UUID", "UUID", "SYMBOL", "SYMBOL", "INT", "STRING", "STRING", "INT", "STRING", "STRING","TIMESTAMP", "STRING", "STRING", "STRING", "BLOB"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, ["dept1", "dept2"]]
+
+    partitionCols = `uploadTime`reviewDept
+    sortCols = "uploadTime"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_temp_public_info() {
+    dbName = "dfs://temp_public_info"
+    tbName = "public_info"
+
+    newColName =  ["tempId", "tempName", "username", "tempCat", "comment" , "deptName", "reviewer", "reviewTime", "factorCat", "tags", "tempCode", "isDeleted", "remover"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "INT", "STRING" , "STRING", "STRING", "TIMESTAMP", "STRING", "STRING", "BLOB", "BOOL", "STRING"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, ["dept1", "dept2"]]
+
+    partitionCols = `reviewTime`deptName
+    sortCols = "reviewTime"
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_plf_message_info() {
+    dbName = "dfs://plf_message_info"
+    tbName = "message_info"
+
+    newColName =  ["messageId", "sender", "receiver", "msgType", "sendTime", "reviewId", "rvType", "isRead"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "INT","TIMESTAMP", "UUID", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, [1, 2, 3, 4]]
+
+    partitionCols = `sendTime`msgType
+    sortCols = `sender`sendTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_preset_param_info() {
+    dbName = "dfs://preset_param_info"
+    tbName = "param_info"
+
+    newColName =  ["username", "presetName",  "presetType", "preset", "lastModified", "isDeleted"]
+    newColType = ["SYMBOL", "STRING", "STRING","STRING", "TIMESTAMP", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, ["user1", "user2"]]
+
+    partitionCols = `lastModified`username
+    sortCols = `lastModified
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_preset_tag_info() {
+    dbName = "dfs://preset_tag_info"
+    tbName = "tag_info"
+
+    newColName =  ["tagName", "type","username"]
+    newColType = ["STRING", "INT", "STRING"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [0..5,`user1`user2`user3]
+
+    partitionCols = `type`username
+    sortCols = `tagName`type
+    isDuplicated = FIRST
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols, isDuplicated)
+}
+
+def create_job_test_info() {
+    dbName = "dfs://job_test_info"
+    tbName = "test_info"
+
+    newColName =  ["tid", "taskname","fid","funcName", "username","jobId","createTime","parameter", "category","comment", "clusterNode", "isDeleted"]
+    newColType = ["UUID", "STRING", "UUID", "STRING", "SYMBOL", "STRING", "TIMESTAMP", "BLOB", "INT", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `createTime`username
+    sortCols = `createTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_workflow_job_list() {
+    dbName = "dfs://workflow_job_list"
+    tbName = "job_list"
+
+    newColName =  ["id", "jobName","username","updateTime","parameter","type", "jobType", "comment", "isDeleted"]
+    newColType = ["UUID", "STRING", "SYMBOL","TIMESTAMP", "BLOB", "INT", "INT", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `updateTime`username
+    sortCols = `updateTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_workflow_schedule_jobs() {
+    dbName = "dfs://workflow_schedule_jobs"
+    tbName = "schedule_jobs"
+
+    newColName =  ["wid", "jobId","username","startDate","endDate","frequency", "scheduledTime", "days", "updateTime", "funcCode", "isDeleted"]
+    newColType = ["UUID", "STRING", "SYMBOL","DATE", "DATE", "STRING", "STRING", "STRING", "TIMESTAMP", "BLOB", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `updateTime`username
+    sortCols = `updateTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_workflow_run_info() {
+    dbName = "dfs://workflow_run_info"
+    tbName = "run_info"
+
+    newColName =  ["wid", "workflowJobId", "taskJobId", "taskName", "username","comment","type","startTime", "clusterNode", "parameter", "isDeleted"]
+    newColType = ["UUID", "STRING", "STRING", "STRING", "SYMBOL", "STRING", "INT", "TIMESTAMP", "STRING", "BLOB", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `startTime`username
+    sortCols = `startTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_data_module_info() {
+    dbName = "dfs://data_module_info"
+    tbName = "module_info"
+
+    newColName =  ["dlid", "moduleName", "username", "createTime", "updateTime", "code", "tags", "comment", "isDeleted"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "TIMESTAMP", "TIMESTAMP", "BLOB", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `updateTime`username
+    sortCols = `updateTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_data_template_info() {
+    dbName = "dfs://data_template_info"
+    tbName = "template_info"
+
+    newColName =  ["dtid", "templateName", "username", "createTime", "updateTime", "code", "parameter", "tags", "comment", "isDeleted"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "TIMESTAMP", "TIMESTAMP", "BLOB", "STRING", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `updateTime`username
+    sortCols = `updateTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_data_run_info() {
+    dbName = "dfs://data_run_info"
+    tbName = "run_info"
+
+    newColName =  ["drid", "dtid","templateName", "username","jobId","createTime","parameter", "dbname", "tbname", "clusterNode", "isDeleted"]
+    newColType = ["UUID", "UUID", "STRING", "SYMBOL", "STRING", "TIMESTAMP", "BLOB", "STRING","STRING","STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `createTime`username
+    sortCols = `createTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_job_status_info() {
+    dbName = "dfs://job_status_info"
+    tbName = "status_info"
+
+    newColName =  ["jobType", "node","userID", "jobId","rootJobId","jobDesc","priority", "parallelism", "clientIp", "clientPort", "receivedTime", "startTime", "endTime", "errorMsg"]
+    newColType = ["INT", "STRING", "STRING", "STRING", "STRING", "STRING", "INT", "INT", "STRING", "INT", "TIMESTAMP", "TIMESTAMP", "TIMESTAMP", "STRING"]
+    partitionTypes = [VALUE, VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, [1,2,3,4], `user1`user2`user3]
+
+    partitionCols = `receivedTime`jobType`userID
+    sortCols = `userID`jobType`receivedTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_analysis_library_info() {
+    dbName = "dfs://analysis_library_info"
+    tbName = "library_info"
+
+    newColName =  ["alid", "moduleName", "username", "createTime", "updateTime", "code", "tags", "comment", "isDeleted"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "TIMESTAMP", "TIMESTAMP", "BLOB", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `updateTime`username
+    sortCols = `updateTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_analysis_template_info() {
+    dbName = "dfs://analysis_template_info"
+    tbName = "template_info"
+
+    newColName =  ["atid", "templateName", "username", "createTime", "updateTime", "code", "parameter", "config", "tags", "comment", "isDeleted"]
+    newColType = ["UUID", "SYMBOL", "SYMBOL", "TIMESTAMP", "TIMESTAMP", "BLOB", "STRING", "BLOB", "STRING", "STRING", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `updateTime`username
+    sortCols = `updateTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+// job_analysis_info已弃用，使用analysis_run_info
+// def create_job_analysis_info() {
+//     dbName = "dfs://job_analysis_info"
+//     tbName = "analysis_info"
+
+//     newColName =  ["aid", "funcName", "testJid", "username","jobId", "createTime", "parameter", "clusterNode", "isDeleted", "atid", "tempName", "jobType", "config"]
+//     newColType = ["UUID", "STRING", "STRING", "SYMBOL","STRING", "TIMESTAMP", "BLOB", "STRING", "BOOL", "UUID", "STRING", "INT", "BLOB"]
+//     partitionTypes = [VALUE, VALUE]
+//     partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+//     partitionCols = `createTime`username
+//     sortCols = `createTime
+
+//     create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+// }
+
+def create_analysis_run_info() {
+    dbName = "dfs://analysis_run_info"
+    tbName = "run_info"
+    newColName =  ["aid", "atid", "tempName", "funcName","username", "testJid", "jobId", "jobType", "createTime", "parameter", "clusterNode", "config", "isDeleted"]
+    newColType = ["UUID", "UUID", "STRING", "STRING","SYMBOL", "STRING", "STRING", "INT", "TIMESTAMP", "BLOB", "STRING", "BLOB", "BOOL"]
+    partitionTypes = [VALUE, VALUE]
+    partitionSchemes = [2023.11M..2023.12M, `user1`user2`user3]
+
+    partitionCols = `createTime`username
+    sortCols = `createTime
+
+    create_backend_tables(dbName, tbName, newColName, newColType, partitionTypes, partitionSchemes, partitionCols, sortCols)
+}
+
+def create_all_table(){
+    allDB = facplf_get_all_backend_db()[facplf_get_all_backend_db() != "dfs://job_analysis_info"]
+    for (dbName in allDB) {//dbName = allDB[12]
+        funcName = "create_" + dbName.split("//")[1]
+        try{call(funcByName(funcName))}catch(ex){print(ex)}
+    }
+}
+
+create_all_table()

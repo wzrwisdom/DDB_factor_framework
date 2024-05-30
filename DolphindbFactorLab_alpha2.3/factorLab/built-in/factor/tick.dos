@@ -1,0 +1,55 @@
+module tick
+/* 单笔订单主动买入卖出均价 */
+
+
+def singleOrderAveragePrice(buyNo,sellNo,tradePrice,tradeQty,BSFlag="B"){
+	if(BSFlag=="B"){
+		 totolMoney=groupby(sum,iif(buyNo>sellNo,tradePrice*tradeQty,0),buyNo).values()[1]
+		 totolqty=groupby(sum,iif(buyNo>sellNo,tradeQty,0),buyNo).values()[1]
+	}
+	else{
+		 totolMoney=groupby(sum,iif(buyNo<sellNo,tradePrice*tradeQty,0),sellNo).values()[1]
+		 totolqty=groupby(sum,iif(buyNo<sellNo,tradeQty,0),sellNo).values()[1]
+		}
+	 return totolMoney\totolqty
+}
+
+
+
+
+/*  股票延时成交订单因子 */
+/* 延时成交挂单数 */
+
+@state
+def delayedTradeNum(bsFlag, flag, side){
+      return iif(bsFlag==side && flag<=1, flag, 0).cumsum()
+
+}
+
+/* 延时成交成交量 */
+
+@state
+def delayedTradeQty(bsFlag, flag, tradeQty, cumTradeQty, side){
+        return iif(bsFlag==side && flag>1, tradeQty, iif(bsFlag==side && flag==1, cumTradeQty, 0)).cumsum()
+}
+
+
+
+
+/* 委买委卖金额 */
+
+
+
+defg calcSZOrderValue(side,price,orderQty,tradePrice,orderType,bsFlag){
+	price_=iif(orderType =="50",price,NULL).nullFill(tradePrice)
+	return sum(iif(side==bsFlag,price_*orderQty,NULL)).nullFill(0)
+}
+
+
+
+/* 主买成交比率因子 */
+
+@state
+def buyTradeRatio(buyNo, sellNo, tradeQty){
+    return cumsum(iif(buyNo>sellNo, tradeQty, 0))\cumsum(tradeQty)
+}

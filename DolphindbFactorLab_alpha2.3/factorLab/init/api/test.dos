@@ -1,0 +1,550 @@
+// 获取因子模板参数信息
+def facplf_get_template_params(param) {
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+    
+    ddb_preset = string(exec tempId from public_info where username = "DolphinDB" and tempCat = 0);
+    id = uuid(param.template_id)
+    draft = select * from draft_info where tempId = id order by lastModified desc limit 1
+    tempName = draft.tempName[0]
+    if (param.template_id in ddb_preset) {
+        ret = (exec preset from loadTable("dfs://preset_param_info", "param_info") where presetType = 'factor_template_' + string(param.template_id) and presetName = '默认控件类型')[0]
+        ret = fromJson(ret)
+        return ret
+    } else {
+        // 用户自定义模板
+        tempCode = draft.tempCode[0]
+        if (isNull(tempCode)) {
+            public = last(select tempName, tempCode from public_info where tempId = id)
+            tempCode = public.tempCode[0]
+            tempName = public.tempName[0]
+            if (isNull(tempCode)) {throw toStdJson({code:"S015"})}
+
+        }
+        // 取出参数
+        param_list = facplf_get_script_syntax(tempCode, tempName)
+        ret = array(ANY)
+        for (p in param_list) {
+            tmp = dict(STRING, ANY)
+            tmp["name"] = p
+            tmp["type"] = NULL
+            ret.append!(tmp)
+        }
+        return ret
+    }
+}
+
+// 找到函数的参数
+def facplf_find_func_params(factor){ 
+    if (count(exec syntax from defs(factor))==0){
+        throw "未能找到该函数"
+    }
+    param_list =(exec syntax from defs(factor)).strReplace("(","").strReplace(")","")[0].split(",")
+    ro = array(STRING)
+    for (i in param_list) {
+        ro.append!(i)
+    }
+    return ro
+}
+
+// 获取用户因子模块代码
+def facplf_find_available_factors(type){
+    //type = 0, 1, 2<all, private, public>
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    review_info = loadTable("dfs://factor_review_info", "review_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+
+    res = table(1:0, `factorName`factorCode, [STRING, BLOB])
+    if(type != 2) {
+        draft_fac = select factorName, factorCode, isDeleted from draft_info where username = user context by factorName limit -1;
+        draft_fac = select factorName, factorCode from draft_fac where isDeleted = false;
+        res.append!(draft_fac)
+    }
+
+    if(type != 1) {
+        // 权限：admin, system reviewer
+        check_right = facplf_get_user_access(user)
+        if ((user == "admin") || (check_right.isReviewer == true)) {
+            dept = exec distinct deptName from dept_info
+        } else {
+            dept = exec distinct deptName from dept_info where username = user 
+        }
+        dept.append!("facplf$public")
+
+        public_fid = select fid, isDeleted from public_info where deptName in dept context by factorName limit -1;
+        public_fid = exec fid from public_fid where isDeleted = false
+
+        public_fac = select factorName, factorCode from review_info where fid in public_fid and status = 1 context by fid limit -1
+        res.append!(public_fac)
+    }
+
+    result = select * from res context by factorName limit 1
+
+    return result
+}
+
+// 单个因子运行
+def facplf_single_fac_test(last_code, template_codes, type) {
+    //加载因子模块
+    //type = 0, 1, 2<all, private, public>
+    all_fac = facplf_find_available_factors(type)
+    each(loadModuleFromScript, all_fac.factorName, all_fac.factorCode, true)
+
+    //运行因子计算模板
+    each(runScript, template_codes)
+    return last_code.eval()
+}
+
+// 多因子模板参数提取
+def facplf_extract_template_codes(templates){
+    draft_info = loadTable("dfs://temp_draft_info", "draft_info")
+    public_info = loadTable("dfs://temp_public_info", "public_info")
+
+    index=0
+    p = dict(INT, ANY, true)
+
+    for (temp in templates) {//temp = templates[1]
+        tmp = dict(STRING, ANY)
+        for (params in temp.template_params) { //params = temp.template_params[0]
+            tmp[params.name] = facplf_extract_control_type(params)
+        }
+
+    template_id = uuid(temp.template_id)
+    template_info = select tempName, tempCode from draft_info where tempId = template_id context by tempId limit -1
+
+    if (count(template_info)==0) {
+        template_info = select tempName, tempCode from public_info where tempId = template_id context by tempId limit -1
+        if(count(template_info)==0){throw toStdJson(dict(`code, ["S015"]))}
+    }
+
+    tmp["tempname"] = template_info["tempName"][0]
+    tmp["template_code"] = template_info["tempCode"][0]
+    tmp["template_id"] = temp.template_id
+    p[index] = tmp
+    index = index+1
+    }
+    return p
+}
+
+// 发送因子计算任务
+def facplf_factor_test_helper(factor_templates, tid, fac_list, type) {
+    /*
+    factor_templates = param.factor_templates
+    type = param.type
+    */
+    user = getCurrentSessionAndUser()[1]
+    // 计算模板参数生成, 调参: factor_templates = param.factor_templates
+    temp_params = facplf_extract_template_codes(factor_templates)
+
+    // 取出所有的模板代码
+    template_codes = array(STRING)
+    for (temp in temp_params.values()) {
+        template_codes.append!(temp.template_code)
+    }
+
+    jobList = array(STRING)
+    for(fac in fac_list) {//fac = fac_list[0]
+        run_codes = array(ANY)
+        //参数代入
+        for(index in temp_params.keys()) {//index = temp_params.keys()[0]
+            temp_param = temp_params[index]
+            param_list = facplf_get_script_syntax(temp_param.template_code, temp_param.tempname)
+            pa = array(ANY)
+            for (i in param_list) {//i = param_list[0]
+                if (typestr(temp_param[i]) == "STRING") {
+                    if(temp_param[i] == "prev_task_result"){
+                        pa.append!(run_codes[index-1])
+                    } else if(temp_param[i] == "facplf_factor_name") {
+                        pa.append!(fac)
+                    } else {
+                        pa.append!(temp_param[i])
+                    }
+                }
+                else {
+                    pa.append!(temp_param[i])
+                }
+            }
+
+            runScript(temp_param.template_code)
+            code = makeUnifiedCall(funcByName(temp_param.tempname), pa)
+            run_codes.append!(code)
+        }
+        last_code = last(run_codes)
+        jobId = user + "_" + fac.regexReplace("::", "_") + "_"+ string(tid).regexReplace("-", "_")
+        jobId = submitJob(jobId, "", facplf_single_fac_test, last_code, template_codes, type)
+        jobList.append!(jobId)
+    }
+
+    //存状态表
+    facplf_save_job_status(jobList, 1)
+
+    return jobList
+}
+
+// 单个因子评价
+def facplf_single_fac_analysis(test_id, node, all_lib, parameters, template_name, template_code, template_parameters) {
+    // 检查每个因子测试任务
+    status = facplf_check_job_done(node, test_id)
+    if(status == 0){
+        throw "前置因子测试任务未完成： " + test_id
+    } else if(status == 1){
+        try{
+            test_result = rpc(node, getJobReturn, test_id)
+        }catch(ex){throw "获取前置因子测试任务失败： " + test_id + ", 错误信息：" + ex[0] + "=>" +ex[1]}
+    } else if(status == -1){
+        throw "前置因子测试任务失败： " + test_id
+    }
+
+    // 运行函数库
+    for(lib in all_lib) {
+        try{loadModuleFromScript(lib.moduleName, lib.code, true)}catch(ex){}
+    }
+
+    // 运行模板
+    runScript(template_code)
+    
+    // 生成模板参数
+    args = array(ANY)
+    for (i in template_parameters) {//i = template_parameters[0]
+        if(typestr(parameters[i]) == "STRING") {
+            if(parameters[i] == "prev_test_result"){
+                args.append!(test_result)
+            } else {
+                args.append!(parameters[i])
+            }
+        } else {
+            args.append!(parameters[i])
+        }
+    }
+    return unifiedCall(funcByName(template_name), args)
+}
+
+// 发送因子评价任务
+/*
+ * @description: 传入评价参数、类型、因子测试id（如有）、节点（如有）、因子名称（如有）
+ * @param test_id: 评价报告id，等于dfs://analysis_run_info的testJid
+ * @return: 本次生成的所有aid
+ */
+def facplf_run_analysis_helper(analysis_template, type, tests = "", node = "", funcs = "") {
+    /*
+    analysis_template = param.analysis_template
+    tests = test_job["jobId"]
+    node = test_job["clusterNode"][0]
+    funcs = test_job["funcName"][0]
+    type = param.type
+    */
+    user = getCurrentSessionAndUser()[1]
+    library_info = loadTable("dfs://analysis_library_info", "library_info")
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    analysis_info = loadTable("dfs://analysis_run_info", "run_info")
+
+    // 加载函数库
+    all_lib = select moduleName, code, isDeleted from library_info context by alid limit -1;
+    all_lib = select moduleName, code from all_lib where isDeleted = false;
+
+    // 加载模板
+    template_id = uuid(analysis_template.template_id)
+    temp_info = select code, templateName, parameter, config, isDeleted from template_info where atid = template_id context by atid limit -1
+    temp_info = select code, templateName, parameter, config from temp_info where isDeleted = false
+    if (count(temp_info["code"]) == 0) {
+        throw toStdJson({code:"S092"})// messafe: 模板代码为空，请输入正确代码后再保存
+    }
+    if(count(temp_info)==0){throw toStdJson({code:"S087"})}
+
+    template_code = temp_info.code[0]
+    template_name = temp_info.templateName[0]
+    template_parameters = (temp_info.parameter[0]).split(',')
+    config = temp_info.config[0]
+    
+    // 参数数据格式清洗
+    parameters = dict(STRING, ANY)
+    for (params in analysis_template.template_params) {//params = analysis_template.template_params[1]
+        try {
+            parameters[params.name] = facplf_extract_control_type(params)
+        }catch(ex) {
+            parameters[params.name] = NULL
+            //throw toStdJson(dict(`code`variables,["S089", params.name]))//message: 传入参数格式错误
+        }
+    }
+
+    aids = array(UUID)
+    jobList = array(STRING)
+
+    // 判断是否进行因子测试
+    if (type != 3) {
+        for(test_id in tests) {//test_id = tests[0]
+            // 生成任务参数
+            aid = rand(uuid(),1)[0]
+            jobId = user + "_" + template_name + "_" + string(aid).strReplace(string('-'),string('_'))
+            jobId = submitJob(jobId, "factor test analysis", facplf_single_fac_analysis, test_id, node, all_lib, parameters, template_name, template_code, template_parameters)
+
+            aids.append!(aid)
+            jobList.append!(jobId)
+        }
+    } else {
+        // 生成任务参数
+        aid = rand(uuid(),1)[0]
+        args = array(ANY)
+        if (count(template_parameters) != 0){
+            for (i in template_parameters) {// i = template_parameters[0]
+                args.append!(parameters[i])
+            }
+        }
+        // 加载函数名和模板代码
+        for (lib in all_lib) {//lib = all_lib[0]
+            try {
+                loadModuleFromScript(lib.moduleName, lib.code, true)
+            }catch(ex) {}
+        }
+        runScript(template_code)
+        jobId = user + "_" + template_name + "_" + string(aid).strReplace(string('-'),string('_'))
+        jobId = submitJob(jobId, "customized analysis", unifiedCall, funcByName(template_name), args)
+
+        aids.append!(aid)
+        jobList.append!(jobId)
+    }
+
+    //存状态表
+    facplf_save_job_status(jobList, 2)
+
+    //写表
+    n = count(aids)
+    res_tb = table(
+        take(aids, n) as aid,
+        take(template_id, n) as atid,
+        take(template_name, n) as tempName,
+        take(funcs, n) as funcName, 
+        take(user, n) as username, 
+        take(tests, n) as testJid,
+        take(jobList, n) as jobId,
+        take(type, n) as jobType,
+        take(now(), n) as createTime, 
+        take(blob(toStdJson(analysis_template)), n) as parameter, 
+        take(getNodeAlias(), n) as clusterNode, 
+        take(config, n) as config,
+        take(false, n) as isDeleted)
+    analysis_info.append!(res_tb)
+    res = dict(`aly_run_id, [aids])
+    return res
+}
+
+// 因子测试
+def facplf_create_factor_tests(param) {
+    user = getCurrentSessionAndUser()[1]
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    test_tb = loadTable("dfs://job_test_info", "test_info")
+
+    //返回
+    ret = dict(STRING, ANY)
+    
+    // 获取所有因子
+    fac_list = array(STRING)
+    fac_ids = array(UUID)
+
+    //根据类型
+    if(param.type == 1) {
+        for (fac in param.factors){//fac = param.factors[0]
+            factor_id = uuid(fac.factor_id)
+            facName = (exec factorName from draft_info where fid = factor_id context by fid limit -1)[0]
+            for (func in fac.funcs){// func = fac.funcs[0]
+                fac_list.append!(facName+"::"+func)
+                fac_ids.append!(factor_id)
+            }
+        }
+    } else if (param.type == 2) {
+        for (fac in param.factors){//fac = param.factors[0]
+            factor_id = uuid(fac.factor_id)
+            // 先取系统下的公开因子, 如果没有再取部门下的公开子
+            res = select factorName, deptName, isDeleted from public_info where fid = factor_id context by fid, deptName limit -1
+            facName = (exec factorName from res where isDeleted = false)[0]
+            for (func in fac.funcs){// func = fac.funcs[0]
+                fac_list.append!(facName+"::"+func)
+                fac_ids.append!(factor_id)
+            }
+        }
+    }
+ 
+    tid = rand(uuid(),1)[0]
+    ret["test_id"] = tid
+    node = getNodeAlias()
+    mainJobId = user + "_" + "test" + "_" +string(tid).regexReplace("-", "_")
+    mainJob = submitJobEx(mainJobId, "main job of factor tests ", 8, 2, facplf_factor_test_helper, param.factor_templates, tid, fac_list, param.type)
+    status = facplf_check_job_done(node, mainJobId)
+
+    //发送任务若未成功
+    if(status == -1){
+        throw toStdJson(dict(`code`variables, ["S096", getJobStatus(mainJobId)["errorMessage"][0]])) 
+    } else if(status == 0){
+        cancelJob(mainJobId)
+        throw toStdJson({code:"S097"})
+    }
+
+    jobList = user + "_" + fac_list.regexReplace("::", "_") + "_"+ string(tid).regexReplace("-", "_")
+    ret["tests"] = jobList
+
+    n = count(fac_list)
+    taskname = iif(typestr(param.name)!="VOID", param.name, fac_list.split("::")[0])
+    comment = iif(typestr(param.comment)!="VOID", param.comment,string(NULL))
+    category = param.type-1 //表内：0为草稿，1为公开
+
+    tmp = table(
+        take(tid, n) as `tid, 
+        take(taskname, n) as `taskname,
+        take(fac_ids, n) as `fid,
+        take(fac_list,n) as `funcName,
+        take(user, n) as `username, 
+        take(jobList, n) as `jobId, 
+        take(now(), n) as `createTime, 
+        take(blob(toStdJson(param.factor_templates)), n) as `parameter, 
+        take(category, n) as `category, 
+        take(comment, n) as `comment, 
+        take(node, n) as `clusterNode, 
+        take(false, n) as `isDeleted)
+    test_tb.append!(tmp)
+
+    if(param.analysis == true) {
+        analysisId = user + "_" + "analysis" + "_" +string(tid).regexReplace("-", "_")
+        analysisId = submitJob(analysisId, "", facplf_run_analysis_helper, param.analysis_template, param.type, jobList, node, fac_list)
+    }
+    return ret
+}
+
+// 查询测试结果
+def facplf_get_test_status(param) {
+    test_info = loadTable("dfs://job_test_info", "test_info")
+    analysis_info = loadTable("dfs://analysis_run_info","run_info")
+    ret = dict(STRING, ANY)
+
+    test = dict(STRING, ANY)
+    test_job = select funcName, jobId, clusterNode  from test_info where jobId = param.test_id
+    test["test_id"] = param.test_id
+    test["status"] = facplf_get_job_status(test_job.jobId[0], 1, test_job.clusterNode[0])
+
+    ret["test"] = test
+    ret["factor_name"] = test_job.funcName.split("::")[0][0]
+    ret["func_name"] = test_job.funcName.split("::")[1][0]
+
+    if (test["status"]==1) {
+        analysis = dict(STRING, ANY)
+        tmp = select aid, jobId, clusterNode,isDeleted from analysis_info where testJid = param.test_id context by aid limit -1
+        tmp = select * from tmp where isDeleted = false
+        analysis['analysis_id'] = tmp.aid[0]
+        analysis['status'] = facplf_get_job_status(tmp.jobId[0], 2, tmp.clusterNode[0])
+        ret["analysis"] = analysis
+    }
+    return ret
+}
+
+
+
+//////////////
+/////接口/////
+//////////////
+// 草稿测试
+def facplf_create_draft_test(param) {
+    params = param
+    params["type"] = 1
+    res = facplf_create_factor_tests(params)
+    return dict(["tests"], [res["tests"]])
+}
+
+// 公开因子/批量测试
+def facplf_create_public_tests(param) {
+    params = param
+    params["type"] = 2
+    res = facplf_create_factor_tests(params)
+    //避免并发写入任务状态冲突
+    sleep(2000)
+    return dict(["test_id"], [res["test_id"]])
+}
+
+// 获取批量测试列表
+def facplf_get_multi_tests_list() {
+    user = getCurrentSessionAndUser()[1]
+    test_info = loadTable("dfs://job_test_info", "test_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+
+    //更新status_info状态
+    try{facplf_update_job_status()}catch(ex){}
+
+    //获取记录
+    test_tb = select tid as test_id, taskname as name, jobId, createTime, comment, clusterNode from test_info where category = 1 and username = user
+    
+    //无则返回空
+    if (count(test_tb)==0){return dict(`items`total, [array(ANY), 0])}
+
+    //获取状态表
+    status_tb = select jobId, startTime, endTime, errorMsg from status_info where userId = user and jobType = 1 context by jobId limit -1
+
+    //运行记录+状态表
+    comb_tb = select l.*, r.endTime, r.errorMsg from test_tb l left join status_tb r on l.jobId = r.jobId
+
+    //解析单个任务
+    comb_tb["single_status"] = each(facplf_parse_job_status, comb_tb)
+
+    //解析多任务
+    ret = select test_id, name, facplf_get_multi_tests_status(single_status) as status, createTime as create_time, comment from comb_tb context by test_id csort createTime limit 1
+
+    ret = select * from ret order by create_time desc
+
+    res = dict(STRING, ANY)
+    res["items"]=ret
+    res["total"]=size(ret)
+    return res
+}
+
+// 批量测试任务详情
+def facplf_get_multi_tests_result(param) {
+    test_info = loadTable("dfs://job_test_info", "test_info")
+    analysis_info = loadTable("dfs://analysis_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    
+    // 更新status_info状态
+    try{facplf_update_job_status()}catch(ex){}
+
+    res = dict(STRING, ANY)
+    params = dict(STRING, ANY)
+
+    //取出测试运行记录
+    test_id = uuid(param.test_id);
+    test = select * from test_info where tid = test_id
+    test_job = test["jobId"]
+
+    //返回值
+    res["test_id"] = param.test_id
+    res["name"] = test.taskname[0]
+    res["comment"] = test.comment[0]
+    res["create_time"] = test.createTime[0]
+    params["factor_templates"] = test.parameter[0]
+
+    //运行记录状态
+    test_status_tb = select jobId, endTime, errorMsg from status_info where jobType = 1 and jobId in test_job context by jobId limit -1
+    test_tb = select l.funcName, l.jobId, r.endTime, r.errorMsg from test l left join test_status_tb r on l.jobId = r.jobId
+    test_tb["status"] = each(facplf_parse_job_status, test_tb)
+    res["status"] = facplf_get_multi_tests_status(test_tb["status"])
+    
+    jobs = select funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, jobId as test_id, status as test_status from test_tb
+
+    //评价记录
+    analysis = select * from analysis_info where jobType = 2 and testJid in test_job
+    analysis_job = analysis["jobId"]
+
+    if (count(analysis_job) == 0) {
+        params["analysis"] = false
+    } else {
+        params["analysis"] = true
+        params["analysis_template"] = analysis["parameter"][0]
+
+        analysis_status_tb = select jobId, endTime, errorMsg from status_info where jobType = 2 and jobId in analysis_job context by jobId limit -1
+        analysis_status_tb["status"] = each(facplf_parse_job_status, analysis_status_tb)
+        analysis_tb = select l.aid, l.testJid, r.status from analysis l left join analysis_status_tb r on l.jobId = r.jobId
+        jobs = select l.*, r.aid as analysis_record_id, r.status as analysis_status from jobs l left join analysis_tb r on l.test_id = r.testJid 
+    }
+
+    res["jobs"] = jobs
+    res["params"] = params
+    return res
+}

@@ -1,0 +1,1047 @@
+module TLDataModule
+/**
+* This function writes the input log to a log file and prints it to the console.
+*
+* @param log: STRING, representing the log message to be written and printed.
+*/
+def writeLogAndPrint(log){
+    writeLog(log)
+    print(log)
+}
+
+/**
+* Recursively finds all files in a directory and its subdirectories that match a given pattern.
+*
+* @param path: STRING, A string representing the path of the directory to search.
+* @param regex: STRING, A string representing the pattern to match.
+* @return  STRING VECTOR, A list of file paths that match the given pattern.
+*/
+def findPath(fileDir, regex=NULL){
+    if(endsWith(fileDir, "/")){
+        filedir = fileDir
+    }else{
+        filedir = fileDir + "/"
+    }
+    res = filedir + exec filename from files(filedir) where regexFind(filename, regex) != -1
+    folderFiles = exec filename from files(filedir) where isDir=true
+    if(size(folderFiles)==0) return res
+    for(folder in folderFiles){
+            res = res join findPath(filedir + folder, regex)
+    }
+    return res
+}
+
+/**
+* Return market type, in ['SH', 'SZ']
+*/
+def renderMarketFromFilePath(filePath){
+    if (regexFind(filePath, "SH")!=-1){
+        return "SH"
+    }else if (regexFind(filePath, "SZ")!=-1){
+        return "SZ"
+    }else{
+        SZFileNames = ["mdl_6_28_0.csv", "Order.csv", "mdl_6_33_0.csv", "Trade.csv", "mdl_6_36_0.csv"]
+        for (name in SZFileNames){
+            if (regexFind(filePath, ".*"+name+"$")!=-1){
+                return "SZ"
+            }
+        }
+        return "SH"
+    }
+    throw "Market not matched: " + filePath
+}
+
+/**
+* Load data from a CSV file into a DolphinDB table.
+* 
+* @param dbName: STRING, The name of the database where the table is located.
+* @param tbName: STRING, The name of the table to be loaded.
+* @param filePath: STRING VECTOR, The path of the CSV file to be loaded.
+* @param renderSchemaCsvFunc: FUNCTION, The function used to generate the schema of the CSV file.
+* @param renderDateListFunc: FUNCTION, The function used to generate a list of dates from the file path.
+* @param renderTransformedDataFunc: FUNCTION, The function used to transform the data before loading it into the table.
+*/
+def loadOneFile(dbName, tbName, filePath, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc){
+    day = renderDateListFunc(filePath)[0][0]
+    market = renderMarketFromFilePath(filePath)
+    csvRows = extractTextSchema(filePath).rows()
+    givenRows = renderSchemaCsvFunc(day, market).rows()
+    writeLogAndPrint("file column num: " + csvRows + ", given columns: " + givenRows)
+    transformedData = ploadText(filePath, schema=renderSchemaCsvFunc(day, market))
+    renderTransformedDataFunc(dbName, tbName, filePath, transformedData, day, market)
+}
+
+/**
+* Load multiple files into a DolphinDB table.
+* 
+* @param dbName: STRING, database name.
+* @param tbName: STRING, table name.
+* @param filePathList: STRING VECTOR, A list of file paths to be loaded.
+* @param renderSchemaCsvFunc: FUNCTION, The function used to generate the schema of the CSV file.
+* @param renderDateListFunc: FUNCTION, The function used to generate a list of dates from the file path.
+* @param renderTransformedDataFunc: FUNCTION, The function used to transform the data before loading it into the table.
+*/
+def loadFiles(dbName, tbName, filePathList, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc){
+    for (filePath in filePathList){
+        loadOneFile(dbName, tbName, filePath, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc)
+        writeLogAndPrint("Server S0200 FACPLF: File '" + filePath + "' loaded to table '" + dbName + ":" + tbName + "' successfully.")
+    }
+}
+
+/**
+* This function creates a database and a table with the given names. If the database or table already exists, it will be dropped and recreated.
+* 
+* @param dbName: STRING, The name of the database to be created.
+* @param tbName: STRING, The name of the table to be created.
+* @param initDb: BOOL, Whether to drop and recreate the database if it already exists.
+* @param initTb: BOOL, Whether to drop and recreate the table if it already exists.
+* @param creatDbFunc: FUNCTION, The function used to create the database.
+* @param createTbFunc: FUNCTION, The function used to create the table.
+*/
+def createDBAndTable(dbName, tbName, initDb, initTb, creatDbFunc, createTbFunc){
+    if (!existsDatabase(dbName)) {
+        creatDbFunc(dbName)
+        writeLogAndPrint("Server S0200 FACPLF: Database '" + dbName + "' created successfully.")
+    } else if (initDb) {
+        dropDatabase(dbName)
+        writeLogAndPrint("Server S0200 FACPLF: Database '" + dbName + "' dropped successfully.")
+        creatDbFunc(dbName)
+        writeLogAndPrint("Server S0200 FACPLF: Database '" + dbName + "' created successfully.")
+    }
+    if (!existsTable(dbName, tbName)) {
+        createTbFunc(dbName, tbName)
+        writeLogAndPrint("Server S0200 FACPLF: Table '" + tbName + "' created successfully.")
+    } else if (initTb) {
+        dropTable(database(dbName), tbName)
+        writeLogAndPrint("Server S0200 FACPLF: Table '" + tbName + "' dropped successfully.")
+        createTbFunc(dbName, tbName)
+        writeLogAndPrint("Server S0200 FACPLF: Table '" + tbName + "' created successfully.")
+    }
+}
+
+/**
+* Cut a list of file paths into smaller chunks for parallel processing.
+*
+* @param filePathList: STRING VECTOR, A list of file paths to be cut.
+* @param threadNum: INT, The number of threads to be used for parallel processing.
+* @return ANY VECTOR, A list of file paths cut into smaller chunks for parallel processing.
+*/
+def cutFilePathList(filePathList, threadNum){
+    parallel = min(threadNum, size(filePathList))
+    num = size(filePathList) / parallel
+    cond = size(filePathList) % parallel
+    points = iterate(0, 1, take(num+1, cond+1) <- take(num, parallel - cond-1))
+    filePathListCutted = cut(filePathList, points-points[0])
+    return filePathListCutted
+}
+
+/**
+* Submits a DolphinDB job with the given file path list, database name, table name, and department name.
+* 
+* @param dbName: STRING, The name of the database to load the data into.
+* @param tbName: STRING, The name of the table to load the data into.
+* @param filePathList: STRING VECTOR, A list of file paths to be loaded into the database table.
+* @param dateList: DATE VECTOR, A list of dates to be loaded into the database table.
+* @param renderSchemaCsvFunc: FUNCTION, The function used to generate the schema of the CSV file.
+* @param renderDateListFunc: FUNCTION, The function used to generate a list of dates from the file path.
+* @param renderTransformedDataFunc: FUNCTION, The function used to transform the data before loading it into the table.
+*/
+def submitDataLoadJob(dbName, tbName, filePathList, dateList, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc){
+    dlid = rand(uuid(), 1)[0]
+    startDate_ = first(dateList)
+    endDate_ = last(dateList)
+    createTime = now()
+    user = getCurrentSessionAndUser()[1]
+    jobDes= user + " " + dbName + ":" + tbName + " "+string(now())
+    jobId = user + "_" + concat((string(now()).regexReplace(":", "")).split("."), "_") + "_" + string(dlid).regexReplace("-", "_")
+    jobId = submitJob(jobId, jobDes, loadFiles{dbName, tbName, filePathList, renderSchemaCsvFunc, renderDateListFunc, renderTransformedDataFunc})
+    writeLogAndPrint("Server S0200 FACPLF: Job '" + jobId + "' submitted successfully.")
+    return jobId
+}
+
+/**
+* Return a list of dates according to the file path list.
+*/
+def renderDateList(filePathList){
+    l = array(DATE, 0)
+    for (filePath in filePathList){
+        splited = filePath.split("/")
+        l.append!(temporalParse(splited[regexFind(splited, "[0-9]{8}$")==0], "yyyyMMdd"))
+    }
+    return l
+}
+
+/**
+* Return a list of file paths under the specified directory.
+*/
+def renderFilePathListEntrustAll(rootPath, startDate, endDate){
+    SH = findPath(rootPath, "mdl_4_19_0.csv$")
+    SZ = join(findPath(rootPath, "Order.csv$"), findPath(rootPath, "mdl_6_33_0.csv$"))
+    All = join(SH, SZ)
+    res = exec filePath from table(renderDateList(All) as `fileDate, All as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListEntrustSH(rootPath, startDate, endDate){
+    SH = findPath(rootPath, "mdl_4_19_0.csv$")
+    res = exec filePath from table(renderDateList(SH) as `fileDate, SH as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListEntrustSZ(rootPath, startDate, endDate){
+    SZ = join(findPath(rootPath, "Order.csv$"), findPath(rootPath, "mdl_6_33_0.csv$"))
+    res = exec filePath from table(renderDateList(SZ) as `fileDate, SZ as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListTradeAll(rootPath, startDate, endDate){
+    SH = findPath(rootPath, "Transaction.csv$")
+    SZ = join(findPath(rootPath, "Trade.csv$"), findPath(rootPath, "mdl_6_36_0.csv$"))
+    All = join(SH, SZ)
+    res = exec filePath from table(renderDateList(All) as `fileDate, All as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListTradeSH(rootPath, startDate, endDate){
+    SH = findPath(rootPath, "Transaction.csv$")
+    res = exec filePath from table(renderDateList(SH) as `fileDate, SH as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListTradeSZ(rootPath, startDate, endDate){
+    SZ = join(findPath(rootPath, "Trade.csv$"), findPath(rootPath, "mdl_6_36_0.csv$"))
+    res = exec filePath from table(renderDateList(SZ) as `fileDate, SZ as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListSnapshotAll(rootPath, startDate, endDate){
+    Path1 = findPath(rootPath, "MarketData.csv$")
+    Path2 = findPath(rootPath, "mdl_6_28_0.csv$")
+    All = join(Path1, Path2)
+    res = exec filePath from table(renderDateList(All) as `fileDate, All as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListSnapshotSH(rootPath, startDate, endDate){
+    All = findPath(rootPath, "MarketData.csv$")
+    SH = All[regexFind(All, "SZ") == -1]
+    res = exec filePath from table(renderDateList(SH) as `fileDate, SH as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+def renderFilePathListSnapshotSZ(rootPath, startDate, endDate){
+    Path1 = findPath(rootPath, "MarketData.csv$")
+    Path1 = Path1[regexFind(Path1, "SZ") != -1]
+    Path2 = findPath(rootPath, "mdl_6_28_0.csv$")
+    All = join(Path1, Path2)
+    res = exec filePath from table(renderDateList(All) as `fileDate, All as `filePath) where startDate <= fileDate, fileDate <= endDate
+    if (size(res)!=0){
+        return res
+    }else{
+        throw "User U0401 FACPLF: No file found between " + startDate + ": " + endDate
+    }
+}
+
+/**
+* Return partitioned table schema.
+*/
+def renderSchemaTbEntrustAll(){
+    name = `ChannelNo`ApplSeqNum`MDStreamID`SecurityID`SecurityIDSource`Price`OrderQty`Side`TradeTime`OrderType`LocalTime`SeqNo`OrderNO`DataStatus`BizIndex`Market
+	type = [INT, LONG, SYMBOL, SYMBOL, SYMBOL, DOUBLE, INT, SYMBOL, TIMESTAMP, SYMBOL, TIME, LONG, LONG, INT,LONG, SYMBOL]
+	return table(1:0, name, type)
+}
+def renderSchemaTbEntrustSH(){
+    name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`OrderType`OrderNO`Price`OrderQty`Side`BizIndex`LocalTime`SeqNo
+	type = `INT`LONG`INT`SYMBOL`TIMESTAMP`SYMBOL`INT`DOUBLE`INT`SYMBOL`INT`TIME`INT
+	return table(1:0, name, type)
+}
+def renderSchemaTbEntrustSZ(){
+    name = `ChannelNo`ApplSeqNum`MDStreamID`SecurityID`SecurityIDSource`Price`OrderQty`Side`TradeTime`OrderType`LocalTime`SeqNo`OrderNO`DataStatus`BizIndex`Market
+	type = [INT, LONG, SYMBOL, SYMBOL, SYMBOL, DOUBLE, INT, SYMBOL, TIMESTAMP, SYMBOL, TIME, LONG, LONG, INT,LONG, SYMBOL]
+	return table(1:0, name, type)
+}
+def renderSchemaTbTradeAll(){
+    name = `ChannelNo`ApplSeqNum`MDStreamID`BidApplSeqNum`OfferApplSeqNum`SecurityID`SecurityIDSource`TradePrice`TradeQty`ExecType`TradeTime`LocalTime`SeqNo`DataStatus`TradeMoney`TradeBSFlag`BizIndex`OrderKind`Market
+    type = [INT, LONG, SYMBOL, LONG, LONG, SYMBOL, SYMBOL, DOUBLE, INT, SYMBOL, TIMESTAMP, TIME, LONG, INT, DOUBLE, SYMBOL, LONG, SYMBOL, SYMBOL]
+    return table(1:0, name, type)
+}
+def renderSchemaTbTradeSH(){
+    name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`TradePrice`TradeQty`TradeMoney`BidApplSeqNum`OfferApplSeqNum`TradeBSFlag`BizIndex`LocalTime`SeqNo
+    type = `INT`INT`INT`SYMBOL`TIMESTAMP`DOUBLE`INT`DOUBLE`LONG`LONG`SYMBOL`LONG`TIME`INT
+    return table(1:0, name, type)
+}
+def renderSchemaTbTradeSZ(){
+    name = `ChannelNo`ApplSeqNum`MDStreamID`BidApplSeqNum`OfferApplSeqNum`SecurityID`SecurityIDSource`TradePrice`TradeQty`ExecType`TradeTime`LocalTime`SeqNo`OrderKind
+    type = `INT`LONG`SYMBOL`LONG`LONG`SYMBOL`SYMBOL`DOUBLE`INT`SYMBOL`TIMESTAMP`TIME`INT`SYMBOL
+    return table(1:0, name, type)
+}
+def renderSchemaTbSnapshotAll(){
+    schemaTable = table(
+		array(SYMBOL, 0) as Market,
+		array(TIMESTAMP, 0) as TradeTime,
+		array(SYMBOL, 0) as MDStreamID,
+		array(SYMBOL, 0) as SecurityID,
+		array(SYMBOL, 0) as SecurityIDSource,
+		array(SYMBOL, 0) as TradingPhaseCode,
+		array(INT, 0) as ImageStatus,
+		array(DOUBLE, 0) as PreCloPrice,
+		array(INT, 0) as NumTrades,
+		array(INT, 0) as TotalVolumeTrade,
+		array(DOUBLE, 0) as TotalValueTrade,
+		array(DOUBLE, 0) as LastPrice,
+		array(DOUBLE, 0) as OpenPrice,
+		array(DOUBLE, 0) as HighPrice,
+		array(DOUBLE, 0) as LowPrice,
+		array(DOUBLE, 0) as ClosePrice,
+		array(DOUBLE, 0) as DifPrice1,
+		array(DOUBLE, 0) as DifPrice2,
+		array(DOUBLE, 0) as PE1,
+		array(DOUBLE, 0) as PE2,
+		array(DOUBLE, 0) as PreCloseIOPV,
+		array(DOUBLE, 0) as IOPV,
+		array(INT, 0) as TotalBidQty,
+		array(DOUBLE, 0) as WeightedAvgBidPx,
+		array(DOUBLE, 0) as AltWAvgBidPri,
+		array(INT, 0) as TotalOfferQty,
+		array(DOUBLE, 0) as WeightedAvgOfferPx,
+		array(DOUBLE, 0) as AltWAvgAskPri,
+		array(DOUBLE, 0) as UpLimitPx,
+		array(DOUBLE, 0) as DownLimitPx,
+		array(INT, 0) as OpenInt,
+		array(DOUBLE, 0) as OptPremiumRatio,
+		array(DOUBLE[], 0) as OfferPrice,
+		array(DOUBLE[], 0) as BidPrice,
+		array(INT[], 0) as OfferOrderQty,
+		array(INT[], 0) as BidOrderQty,
+		array(INT[], 0) as BidNumOrders,
+		array(INT[], 0) as OfferNumOrders,
+		array(INT, 0) as ETFBuyNumber,
+		array(INT, 0) as ETFBuyAmount,
+		array(DOUBLE, 0) as ETFBuyMoney,
+		array(INT, 0) as ETFSellNumber,
+		array(INT, 0) as ETFSellAmount,
+		array(DOUBLE, 0) as ETFSellMoney,
+		array(DOUBLE, 0) as YieldToMatu,
+		array(DOUBLE, 0) as TotWarExNum,
+		array(INT, 0) as WithdrawBuyNumber,
+		array(INT, 0) as WithdrawBuyAmount,
+		array(DOUBLE, 0) as WithdrawBuyMoney,
+		array(INT, 0) as WithdrawSellNumber,
+		array(INT, 0) as WithdrawSellAmount,
+		array(DOUBLE, 0) as WithdrawSellMoney,
+		array(INT, 0) as TotalBidNumber,
+		array(INT, 0) as TotalOfferNumber,
+		array(INT, 0) as MaxBidDur,
+		array(INT, 0) as MaxSellDur,
+		array(INT, 0) as BidNum,
+		array(INT, 0) as SellNum,
+		array(TIME, 0) as LocalTime,
+		array(INT, 0) as SeqNo,
+		array(INT[], 0) as OfferOrders,
+		array(INT[], 0) as BidOrders
+	)
+	return schemaTable
+}
+def renderSchemaTbSnapshotSH(){
+    schemaTable = table(
+        array(TIMESTAMP, 0) as TradeTime,
+        array(SYMBOL, 0) as SecurityID,
+        array(INT, 0) as ImageStatus,
+        array(DOUBLE, 0) as PreCloPrice,
+        array(DOUBLE, 0) as OpenPrice,
+        array(DOUBLE, 0) as HighPrice,
+        array(DOUBLE, 0) as LowPrice,
+        array(DOUBLE, 0) as LastPrice,
+        array(DOUBLE, 0) as ClosePrice,
+        array(SYMBOL, 0) as TradingPhaseCode,
+        array(INT, 0) as NumTrades,
+        array(INT, 0) as TotalVolumeTrade,
+        array(DOUBLE, 0) as TotalValueTrade,
+        array(INT, 0) as TotalBidQty,
+        array(DOUBLE, 0) as WeightedAvgBidPx,
+        array(DOUBLE, 0) as AltWAvgBidPri,
+        array(INT, 0) as TotalOfferQty,
+        array(DOUBLE, 0) as WeightedAvgOfferPx,
+        array(DOUBLE, 0) as AltWAvgAskPri,
+        array(INT, 0) as ETFBuyNumber,
+        array(INT, 0) as ETFBuyAmount,
+        array(DOUBLE, 0) as ETFBuyMoney,
+        array(INT, 0) as ETFSellNumber,
+        array(INT, 0) as ETFSellAmount,
+        array(DOUBLE, 0) as ETFSellMoney,
+        array(DOUBLE, 0) as YieldToMatu,
+        array(DOUBLE, 0) as TotWarExNum,
+        array(DOUBLE, 0) as UpLimitPx,
+        array(DOUBLE, 0) as DownLimitPx,
+        array(INT, 0) as WithdrawBuyNumber,
+        array(INT, 0) as WithdrawBuyAmount,
+        array(DOUBLE, 0) as WithdrawBuyMoney,
+        array(INT, 0) as WithdrawSellNumber,
+        array(INT, 0) as WithdrawSellAmount,
+        array(DOUBLE, 0) as WithdrawSellMoney,
+        array(INT, 0) as TotalBidNumber,
+        array(INT, 0) as TotalOfferNumber,
+        array(INT, 0) as MaxBidDur,
+        array(INT, 0) as MaxSellDur,
+        array(INT, 0) as BidNum,
+        array(INT, 0) as SellNum,
+        array(DOUBLE, 0) as IOPV,
+        array(DOUBLE[], 0) as OfferPrice,
+        array(DOUBLE[], 0) as BidPrice,
+        array(INT[], 0) as OfferOrderQty,
+        array(INT[], 0) as BidOrderQty,
+        array(INT[], 0) as BidNumOrders,
+        array(INT[], 0) as OfferNumOrders,
+        array(TIME, 0) as LocalTime,
+        array(INT, 0) as SeqNo,
+        array(INT[], 0) as OfferOrders,
+        array(INT[], 0) as BidOrders
+    )
+    return schemaTable
+}
+
+def renderSchemaTbSnapshotSZ(){
+    schemaTable = table(
+        array(TIMESTAMP, 0) as TradeTime,
+        array(SYMBOL, 0) as MDStreamID,
+        array(SYMBOL, 0) as SecurityID,
+        array(SYMBOL, 0) as SecurityIDSource,
+        array(SYMBOL, 0) as TradingPhaseCode,
+        array(DOUBLE, 0) as PreCloPrice,
+        array(INT, 0) as NumTrades,
+        array(INT, 0) as TotalVolumeTrade,
+        array(DOUBLE, 0) as TotalValueTrade,
+        array(DOUBLE, 0) as LastPrice,
+        array(DOUBLE, 0) as OpenPrice,
+        array(DOUBLE, 0) as HighPrice,
+        array(DOUBLE, 0) as LowPrice,
+        array(DOUBLE, 0) as DifPrice1,
+        array(DOUBLE, 0) as DifPrice2,
+        array(DOUBLE, 0) as PE1,
+        array(DOUBLE, 0) as PE2,
+        array(DOUBLE, 0) as PreCloseIOPV,
+        array(DOUBLE, 0) as IOPV,
+        array(INT, 0) as TotalBidQty,
+        array(DOUBLE, 0) as WeightedAvgBidPx,
+        array(INT, 0) as TotalOfferQty,
+        array(DOUBLE, 0) as WeightedAvgOfferPx,
+        array(DOUBLE, 0) as UpLimitPx,
+        array(DOUBLE, 0) as DownLimitPx,
+        array(INT, 0) as OpenInt,
+        array(DOUBLE, 0) as OptPremiumRatio,
+        array(DOUBLE[], 0) as OfferPrice,
+        array(DOUBLE[], 0) as BidPrice,
+        array(INT[], 0) as OfferOrderQty,
+        array(INT[], 0) as BidOrderQty,
+        array(INT[], 0) as BidNumOrders,
+        array(INT[], 0) as OfferNumOrders,
+        array(TIME, 0) as LocalTime,
+        array(INT, 0) as SeqNo,
+        array(INT[], 0) as OfferOrders,
+        array(INT[], 0) as BidOrders
+    )
+    return schemaTable
+}
+
+/**
+* Return CSV file schema.
+*/
+def renderSchemaCsvEntrustAll(day, market){
+    if (market == "SH"){
+        name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`OrderType`OrderNO`Price`OrderQty`Side`BizIndex`LocalTime`SeqNo
+        typeString = `INT`LONG`INT`SYMBOL`TIME`SYMBOL`INT`DOUBLE`INT`SYMBOL`INT`TIME`INT
+        return table(name, typeString)
+    }else{
+        if(day < 2016.05.07){
+            name = `ApplSeqNum`SecurityID`TradeTime`Price`OrderQty`OrderType`Side`ChannelNo`LocalTime`SeqNo
+            typeString = `INT`SYMBOL`TIME`DOUBLE`INT`SYMBOL`SYMBOL`INT`TIME`INT
+        }else{
+            name = `ChannelNo`ApplSeqNum`MDStreamID`SecurityID`SecurityIDSource`Price`OrderQty`Side`TradeTime`OrderType`LocalTime`SeqNo
+            typeString = `INT`LONG`SYMBOL`SYMBOL`SYMBOL`DOUBLE`INT`INT`TIME`INT`TIME`INT
+        }
+        return table(name, typeString)
+    }
+}
+def renderSchemaCsvEntrustSH(day, market){
+    name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`OrderType`OrderNO`Price`OrderQty`Side`BizIndex`LocalTime`SeqNo
+	typeString = `INT`LONG`INT`SYMBOL`TIME`SYMBOL`INT`DOUBLE`INT`SYMBOL`INT`TIME`INT
+	return table(name, typeString)	
+}
+def renderSchemaCsvEntrustSZ(day, market){
+    if(day < 2016.05.07){
+		name = `ApplSeqNum`SecurityID`TradeTime`Price`OrderQty`OrderType`Side`ChannelNo`LocalTime`SeqNo
+		typeString = `INT`SYMBOL`TIME`DOUBLE`INT`SYMBOL`SYMBOL`INT`TIME`INT
+	}else{
+		name = `ChannelNo`ApplSeqNum`MDStreamID`SecurityID`SecurityIDSource`Price`OrderQty`Side`TradeTime`OrderType`LocalTime`SeqNo
+		typeString = `INT`LONG`SYMBOL`SYMBOL`SYMBOL`DOUBLE`INT`INT`TIME`INT`TIME`INT
+	}
+	return table(name, typeString)
+}
+def renderSchemaCsvTradeAll(day, market){
+    if (market == "SH"){
+        if(day >= 2021.04.26){
+            name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`TradePrice`TradeQty`TradeMoney`BidApplSeqNum`OfferApplSeqNum`TradeBSFlag`BizIndex`LocalTime`SeqNo
+            typeString = `INT`INT`INT`SYMBOL`TIME`DOUBLE`INT`DOUBLE`LONG`LONG`SYMBOL`LONG`TIME`INT
+        }else{
+            name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`TradePrice`TradeQty`TradeMoney`BidApplSeqNum`OfferApplSeqNum`TradeBSFlag`LocalTime`SeqNo
+            typeString = `INT`INT`INT`SYMBOL`TIME`DOUBLE`INT`DOUBLE`LONG`LONG`SYMBOL`TIME`INT
+        }
+        return table(name, typeString)	
+    }else{
+        if(day < 2016.05.07){
+            name = `ApplSeqNum`BidApplSeqNum`OfferApplSeqNum`SecurityID`TradeTime`TradePrice`TradeQty`OrderKind`ExecType`ChannelNo`LocalTime`SeqNo
+            typeString = `INT`INT`INT`SYMBOL`TIME`DOUBLE`INT`SYMBOL`SYMBOL`INT`TIME`LONG
+        }else{
+            name = `ChannelNo`ApplSeqNum`MDStreamID`BidApplSeqNum`OfferApplSeqNum`SecurityID`SecurityIDSource`TradePrice`TradeQty`ExecType`TradeTime`LocalTime`SeqNo
+            typeString = `INT`LONG`SYMBOL`LONG`LONG`SYMBOL`SYMBOL`DOUBLE`INT`INT`TIME`TIME`INT	
+        }
+        return table(name, typeString)
+    }
+}
+def renderSchemaCsvTradeSH(day, market){
+    if(day >= 2021.04.26){
+        name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`TradePrice`TradeQty`TradeMoney`BidApplSeqNum`OfferApplSeqNum`TradeBSFlag`BizIndex`LocalTime`SeqNo
+        typeString = `INT`INT`INT`SYMBOL`TIME`DOUBLE`INT`DOUBLE`LONG`LONG`SYMBOL`LONG`TIME`INT
+    }else{
+        name = `DataStatus`ApplSeqNum`ChannelNo`SecurityID`TradeTime`TradePrice`TradeQty`TradeMoney`BidApplSeqNum`OfferApplSeqNum`TradeBSFlag`LocalTime`SeqNo
+        typeString = `INT`INT`INT`SYMBOL`TIME`DOUBLE`INT`DOUBLE`LONG`LONG`SYMBOL`TIME`INT
+    }
+    return table(name, typeString)	
+}
+def renderSchemaCsvTradeSZ(day, market){
+    if(day < 2016.05.07){
+        name = `ApplSeqNum`BidApplSeqNum`OfferApplSeqNum`SecurityID`TradeTime`TradePrice`TradeQty`OrderKind`ExecType`ChannelNo`LocalTime`SeqNo
+        typeString = `INT`INT`INT`SYMBOL`TIME`DOUBLE`INT`SYMBOL`SYMBOL`INT`TIME`LONG
+    }else{
+        name = `ChannelNo`ApplSeqNum`MDStreamID`BidApplSeqNum`OfferApplSeqNum`SecurityID`SecurityIDSource`TradePrice`TradeQty`ExecType`TradeTime`LocalTime`SeqNo
+        typeString = `INT`LONG`SYMBOL`LONG`LONG`SYMBOL`SYMBOL`DOUBLE`INT`INT`TIME`TIME`INT	
+    }
+    return table(name, typeString)
+}
+def renderSchemaCsvSnapshotAll(day, market){
+    if (market == "SH"){
+        if(day < 2019.06.06){
+            name = `TradeTime`SecurityID`ImageStatus`PreCloPrice`OpenPrice`HighPrice`LowPrice`LastPrice`ClosePrice`TradingPhaseCode`NumTrades`TotalVolumeTrade`TotalValueTrade`TotalBidQty`WeightedAvgBidPx`AltWAvgBidPri`TotalOfferQty`WeightedAvgOfferPx`AltWAvgAskPri`ETFBuyNumber`ETFBuyAmount`ETFBuyMoney`ETFSellNumber`ETFSellAmount`ETFSellMoney`YieldToMatu`TotWarExNum`DownLimitPx`UpLimitPx`WithdrawBuyNumber`WithdrawBuyAmount`WithdrawBuyMoney`WithdrawSellNumber`WithdrawSellAmount`WithdrawSellMoney`TotalBidNumber`TotalOfferNumber`MaxBidDur`MaxSellDur`BidNum`SellNum`IOPV`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`LocalTime`SeqNo
+            typeString = `TIME`SYMBOL`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`SYMBOL`INT`INT`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`INT`INT`INT`INT`INT`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`TIME`INT
+        }else{
+            name = `TradeTime`SecurityID`ImageStatus`PreCloPrice`OpenPrice`HighPrice`LowPrice`LastPrice`ClosePrice`TradingPhaseCode`NumTrades`TotalVolumeTrade`TotalValueTrade`TotalBidQty`WeightedAvgBidPx`AltWAvgBidPri`TotalOfferQty`WeightedAvgOfferPx`AltWAvgAskPri`ETFBuyNumber`ETFBuyAmount`ETFBuyMoney`ETFSellNumber`ETFSellAmount`ETFSellMoney`YieldToMatu`TotWarExNum`DownLimitPx`UpLimitPx`WithdrawBuyNumber`WithdrawBuyAmount`WithdrawBuyMoney`WithdrawSellNumber`WithdrawSellAmount`WithdrawSellMoney`TotalBidNumber`TotalOfferNumber`MaxBidDur`MaxSellDur`BidNum`SellNum`IOPV`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`NumOrdersB1`NumOrdersB2`NumOrdersB3`NumOrdersB4`NumOrdersB5`NumOrdersB6`NumOrdersB7`NumOrdersB8`NumOrdersB9`NumOrdersB10`NumOrdersS1`NumOrdersS2`NumOrdersS3`NumOrdersS4`NumOrdersS5`NumOrdersS6`NumOrdersS7`NumOrdersS8`NumOrdersS9`NumOrdersS10`LocalTime`SeqNo
+            typeString = `TIME`SYMBOL`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`SYMBOL`INT`INT`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`INT`INT`INT`INT`INT`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`TIME`INT
+        }
+    }else{
+        if(day < 2016.05.07){
+            name = `TradeTime`SecurityID`PreCloPrice`OpenPrice`HighPrice`LowPrice`LastPrice`NumTrades`TotalVolumeTrade`TotalValueTrade`OpenInt`PE1`PE2`TradingPhaseCode`TotalOfferQty`WeightedAvgOfferPx`TotalBidQty`WeightedAvgBidPx`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`LocalTime`SeqNo
+            typeString = `TIME`SYMBOL`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`DOUBLE`DOUBLE`SYMBOL`INT`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`TIME`INT
+        }else if(day < 2019.06.05){
+            name = `TradeTime`MDStreamID`SecurityID`SecurityIDSource`TradingPhaseCode`PreCloPrice`NumTrades`TotalVolumeTrade`TotalValueTrade`LastPrice`OpenPrice`HighPrice`LowPrice`DifPrice1`DifPrice2`PE1`PE2`PreCloseIOPV`IOPV`TotalBidQty`WeightedAvgBidPx`TotalOfferQty`WeightedAvgOfferPx`UpLimitPx`DownLimitPx`OpenInt`OptPremiumRatio`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`LocalTime`SeqNo
+            typeString = `TIME`SYMBOL`SYMBOL`SYMBOL`SYMBOL`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`TIME`INT
+        }else{
+            name = `TradeTime`MDStreamID`SecurityID`SecurityIDSource`TradingPhaseCode`PreCloPrice`NumTrades`TotalVolumeTrade`TotalValueTrade`LastPrice`OpenPrice`HighPrice`LowPrice`DifPrice1`DifPrice2`PE1`PE2`PreCloseIOPV`IOPV`TotalBidQty`WeightedAvgBidPx`TotalOfferQty`WeightedAvgOfferPx`UpLimitPx`DownLimitPx`OpenInt`OptPremiumRatio`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`NumOrdersB1`NumOrdersB2`NumOrdersB3`NumOrdersB4`NumOrdersB5`NumOrdersB6`NumOrdersB7`NumOrdersB8`NumOrdersB9`NumOrdersB10`NumOrdersS1`NumOrdersS2`NumOrdersS3`NumOrdersS4`NumOrdersS5`NumOrdersS6`NumOrdersS7`NumOrdersS8`NumOrdersS9`NumOrdersS10`LocalTime`SeqNo
+            typeString = `TIME`SYMBOL`SYMBOL`SYMBOL`SYMBOL`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`TIME`INT
+        }
+    }
+    return table(name, typeString)
+}
+def renderSchemaCsvSnapshotSH(day, market){
+    if(day < 2019.06.06){
+        name = `TradeTime`SecurityID`ImageStatus`PreCloPrice`OpenPrice`HighPrice`LowPrice`LastPrice`ClosePrice`TradingPhaseCode`NumTrades`TotalVolumeTrade`TotalValueTrade`TotalBidQty`WeightedAvgBidPx`AltWAvgBidPri`TotalOfferQty`WeightedAvgOfferPx`AltWAvgAskPri`ETFBuyNumber`ETFBuyAmount`ETFBuyMoney`ETFSellNumber`ETFSellAmount`ETFSellMoney`YieldToMatu`TotWarExNum`DownLimitPx`UpLimitPx`WithdrawBuyNumber`WithdrawBuyAmount`WithdrawBuyMoney`WithdrawSellNumber`WithdrawSellAmount`WithdrawSellMoney`TotalBidNumber`TotalOfferNumber`MaxBidDur`MaxSellDur`BidNum`SellNum`IOPV`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`LocalTime`SeqNo
+        typeString = `TIME`SYMBOL`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`SYMBOL`INT`INT`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`INT`INT`INT`INT`INT`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`TIME`INT
+    }else{
+        name = `TradeTime`SecurityID`ImageStatus`PreCloPrice`OpenPrice`HighPrice`LowPrice`LastPrice`ClosePrice`TradingPhaseCode`NumTrades`TotalVolumeTrade`TotalValueTrade`TotalBidQty`WeightedAvgBidPx`AltWAvgBidPri`TotalOfferQty`WeightedAvgOfferPx`AltWAvgAskPri`ETFBuyNumber`ETFBuyAmount`ETFBuyMoney`ETFSellNumber`ETFSellAmount`ETFSellMoney`YieldToMatu`TotWarExNum`DownLimitPx`UpLimitPx`WithdrawBuyNumber`WithdrawBuyAmount`WithdrawBuyMoney`WithdrawSellNumber`WithdrawSellAmount`WithdrawSellMoney`TotalBidNumber`TotalOfferNumber`MaxBidDur`MaxSellDur`BidNum`SellNum`IOPV`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`NumOrdersB1`NumOrdersB2`NumOrdersB3`NumOrdersB4`NumOrdersB5`NumOrdersB6`NumOrdersB7`NumOrdersB8`NumOrdersB9`NumOrdersB10`NumOrdersS1`NumOrdersS2`NumOrdersS3`NumOrdersS4`NumOrdersS5`NumOrdersS6`NumOrdersS7`NumOrdersS8`NumOrdersS9`NumOrdersS10`LocalTime`SeqNo
+        typeString = `TIME`SYMBOL`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`SYMBOL`INT`INT`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`INT`DOUBLE`INT`INT`INT`INT`INT`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`TIME`INT
+    }
+    return table(name, typeString)
+}
+def renderSchemaCsvSnapshotSZ(day, market){
+    if(day < 2016.05.07){
+        name = `TradeTime`SecurityID`PreCloPrice`OpenPrice`HighPrice`LowPrice`LastPrice`NumTrades`TotalVolumeTrade`TotalValueTrade`OpenInt`PE1`PE2`TradingPhaseCode`TotalOfferQty`WeightedAvgOfferPx`TotalBidQty`WeightedAvgBidPx`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`LocalTime`SeqNo
+        typeString = `TIME`SYMBOL`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`INT`DOUBLE`INT`DOUBLE`DOUBLE`SYMBOL`INT`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`TIME`INT
+    }else if(day < 2019.06.05){
+        name = `TradeTime`MDStreamID`SecurityID`SecurityIDSource`TradingPhaseCode`PreCloPrice`NumTrades`TotalVolumeTrade`TotalValueTrade`LastPrice`OpenPrice`HighPrice`LowPrice`DifPrice1`DifPrice2`PE1`PE2`PreCloseIOPV`IOPV`TotalBidQty`WeightedAvgBidPx`TotalOfferQty`WeightedAvgOfferPx`UpLimitPx`DownLimitPx`OpenInt`OptPremiumRatio`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`LocalTime`SeqNo
+        typeString = `TIME`SYMBOL`SYMBOL`SYMBOL`SYMBOL`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`TIME`INT
+    }else{
+        name = `TradeTime`MDStreamID`SecurityID`SecurityIDSource`TradingPhaseCode`PreCloPrice`NumTrades`TotalVolumeTrade`TotalValueTrade`LastPrice`OpenPrice`HighPrice`LowPrice`DifPrice1`DifPrice2`PE1`PE2`PreCloseIOPV`IOPV`TotalBidQty`WeightedAvgBidPx`TotalOfferQty`WeightedAvgOfferPx`UpLimitPx`DownLimitPx`OpenInt`OptPremiumRatio`AskPrice1`AskVolume1`AskPrice2`AskVolume2`AskPrice3`AskVolume3`AskPrice4`AskVolume4`AskPrice5`AskVolume5`AskPrice6`AskVolume6`AskPrice7`AskVolume7`AskPrice8`AskVolume8`AskPrice9`AskVolume9`AskPrice10`AskVolume10`BidPrice1`BidVolume1`BidPrice2`BidVolume2`BidPrice3`BidVolume3`BidPrice4`BidVolume4`BidPrice5`BidVolume5`BidPrice6`BidVolume6`BidPrice7`BidVolume7`BidPrice8`BidVolume8`BidPrice9`BidVolume9`BidPrice10`BidVolume10`NumOrdersB1`NumOrdersB2`NumOrdersB3`NumOrdersB4`NumOrdersB5`NumOrdersB6`NumOrdersB7`NumOrdersB8`NumOrdersB9`NumOrdersB10`NumOrdersS1`NumOrdersS2`NumOrdersS3`NumOrdersS4`NumOrdersS5`NumOrdersS6`NumOrdersS7`NumOrdersS8`NumOrdersS9`NumOrdersS10`LocalTime`SeqNo
+        typeString = `TIME`SYMBOL`SYMBOL`SYMBOL`SYMBOL`DOUBLE`INT`INT`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`DOUBLE`DOUBLE`INT`DOUBLE`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`DOUBLE`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`INT`TIME`INT
+    }
+    return table(name, typeString)
+}
+
+/**
+* Create database.
+*/
+def createDatabaseEntrustAll(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 50])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseEntrustSH(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 25])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseEntrustSZ(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 25])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseTradeAll(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 50])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseTradeSH(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 25])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseTradeSZ(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 25])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseSnapshotAll(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 50])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseSnapshotSH(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 25])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+def createDatabaseSnapshotSZ(dbName){
+    db1 = database(, VALUE, 2020.01.01..2021.01.01)
+    db2 = database(, HASH, [SYMBOL, 25])
+    db = database(dbName, COMPO, [db1, db2], , "TSDB")
+}
+
+/**
+* Create partitioned table.
+*/
+def createTableEntrustAll(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbEntrustAll(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`Market`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableEntrustSH(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbEntrustSH(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableEntrustSZ(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbEntrustSZ(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableTradeAll(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbTradeAll(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`Market`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableTradeSH(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbTradeSH(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableTradeSZ(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbTradeSZ(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableSnapshotAll(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbSnapshotAll(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`Market`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableSnapshotSH(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbSnapshotSH(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+def createTableSnapshotSZ(dbName, tbName){
+    createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbSnapshotSZ(), tableName=tbName, partitionColumns=`TradeTime`SecurityID, compressMethods={TradeTime:"delta"}, sortColumns=`SecurityID`TradeTime, keepDuplicates=ALL)
+}
+
+/**
+*   Order Queue (Snapshot Only)
+*/
+def orderQueueCsvSchema(){
+    name = `TradeTime`SecurityID`ImageStatus`Side`NoPriceLevel`PrcLvlOperator`Price`Volume`NumOrders`NoOrders`OrderQty1`OrderQty2`OrderQty3`OrderQty4`OrderQty5`OrderQty6`OrderQty7`OrderQty8`OrderQty9`OrderQty10`OrderQty11`OrderQty12`OrderQty13`OrderQty14`OrderQty15`OrderQty16`OrderQty17`OrderQty18`OrderQty19`OrderQty20`OrderQty21`OrderQty22`OrderQty23`OrderQty24`OrderQty25`OrderQty26`OrderQty27`OrderQty28`OrderQty29`OrderQty30`OrderQty31`OrderQty32`OrderQty33`OrderQty34`OrderQty35`OrderQty36`OrderQty37`OrderQty38`OrderQty39`OrderQty40`OrderQty41`OrderQty42`OrderQty43`OrderQty44`OrderQty45`OrderQty46`OrderQty47`OrderQty48`OrderQty49`OrderQty50`LocalTime`SeqNo
+    typeString = `TIME`SYMBOL`INT`SYMBOL`INT`INT`DOUBLE`INT`INT`INT join take(`INT, 50) join `TIME`INT
+    return table(name, typeString)
+}
+def joinSnapOrder(nums, securityID, t, orderTB, dbName, tbName, hashNum=50){
+    hashValue = hashBucket(securityID, hashNum)
+    for(num in nums){
+        ids = securityID[hashValue==num]
+        tempData1 = select * from t where SecurityID in ids
+        tempData2 = select * from orderTB where SecurityID in ids
+        tempData1 = lj(tempData1, tempData2, `TradeTime`SecurityID`ImageStatus)
+        tempData1 = sql(select=each(sqlCol, loadTable(dbName, tbName).colNames()), from=tempData1).eval()
+        loadTable(dbName, tbName).append!(tempData1)
+    }
+}
+
+/**
+* Load Order Data (Snapshot Only)
+*/
+
+def loadOrderDataSnapshotAll(day, market, filePath){
+    tmp = filePath.split('/')
+    fileDir = concat(tmp[:tmp.size()-1], '/')
+    if(market == "SH"){
+        orderData = ploadText(fileDir + '/' + files(fileDir, "%OrderQueue.csv").filename[0], schema=orderQueueCsvSchema())
+        orderData = select ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, fixedLengthArrayVector(OrderQty1, 
+            OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, OrderQty10, OrderQty11, OrderQty12, 
+            OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, OrderQty20, OrderQty21, OrderQty22, 
+            OrderQty23, OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, OrderQty30, OrderQty31, OrderQty32, 
+            OrderQty33, OrderQty34, OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, OrderQty40, OrderQty41, OrderQty42, 
+            OrderQty43, OrderQty44, OrderQty45, OrderQty46, OrderQty47, OrderQty48, OrderQty49, OrderQty50) as Orders, Side from orderData
+        orderSell = select TradeTime, SecurityID, ImageStatus, Orders as OfferOrders from orderData where Side = 'S' and isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+        orderBuy = select TradeTime, SecurityID, ImageStatus, Orders as BidOrders from orderData where Side = 'B' and isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+    }
+    else{
+        if(day < 2016.05.07){
+            orderData = ploadText(fileDir + '/' + files(fileDir, "%OrderQueue.csv").filename[0], schema=orderQueueCsvSchema())
+            orderData = select ImageStatus.nullFill(1) as ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, 
+            fixedLengthArrayVector(OrderQty1, OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, 
+            OrderQty10, OrderQty11, OrderQty12, OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, 
+            OrderQty20, OrderQty21, OrderQty22, OrderQty23, OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, 
+            OrderQty30, OrderQty31, OrderQty32, OrderQty33, OrderQty34, OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, 
+            OrderQty40, OrderQty41, OrderQty42, OrderQty43, OrderQty44, OrderQty45, OrderQty46, OrderQty47, OrderQty48, OrderQty49, 
+            OrderQty50) as Orders, Side from orderData
+            orderSell = select ImageStatus, TradeTime, SecurityID, Orders as OfferOrders from orderData where Side = `S and isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+            orderBuy = select ImageStatus, TradeTime, SecurityID, Orders as BidOrders from orderData where Side = `B and  isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+        }
+        else{
+            orderSell = ploadText(fileDir + '/' + files(fileDir, "%mdl_6_28_1.csv").filename[0], schema=orderQueueCsvSchema())
+            orderSell = select ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, fixedLengthArrayVector(OrderQty1, 
+                OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, OrderQty10, OrderQty11, OrderQty12, 
+                OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, OrderQty20, OrderQty21, OrderQty22, OrderQty23, 
+                OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, OrderQty30, OrderQty31, OrderQty32, OrderQty33, OrderQty34, 
+                OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, OrderQty40, OrderQty41, OrderQty42, OrderQty43, OrderQty44, OrderQty45, 
+                OrderQty46, OrderQty47, OrderQty48, OrderQty49, OrderQty50) as OfferOrders from orderSell
+            orderSell = select * from orderSell where isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+            orderBuy = ploadText(fileDir + '/' + files(fileDir, "%mdl_6_28_2.csv").filename[0], schema=orderQueueCsvSchema())
+            orderBuy = select ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, fixedLengthArrayVector(OrderQty1, 
+                OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, OrderQty10, OrderQty11, OrderQty12, 
+                OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, OrderQty20, OrderQty21, OrderQty22, OrderQty23, 
+                OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, OrderQty30, OrderQty31, OrderQty32, OrderQty33, OrderQty34, 
+                OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, OrderQty40, OrderQty41, OrderQty42, OrderQty43, OrderQty44, OrderQty45, 
+                OrderQty46, OrderQty47, OrderQty48, OrderQty49, OrderQty50) as BidOrders from orderBuy
+            orderBuy = select * from orderBuy where isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+        }
+    }
+    orderData = lj(orderSell, orderBuy, `TradeTime`SecurityID`ImageStatus)
+    return orderData
+}
+def loadOrderDataSnapshotSH(day, market, filePath){
+    tmp = filePath.split('/')
+    fileDir = concat(tmp[:tmp.size()-1], '/')
+    orderData = ploadText(fileDir + '/' + files(fileDir, "%OrderQueue.csv").filename[0], schema=orderQueueCsvSchema())
+    orderData = select ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, fixedLengthArrayVector(OrderQty1, 
+        OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, OrderQty10, OrderQty11, OrderQty12, 
+        OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, OrderQty20, OrderQty21, OrderQty22, 
+        OrderQty23, OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, OrderQty30, OrderQty31, OrderQty32, 
+        OrderQty33, OrderQty34, OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, OrderQty40, OrderQty41, OrderQty42, 
+        OrderQty43, OrderQty44, OrderQty45, OrderQty46, OrderQty47, OrderQty48, OrderQty49, OrderQty50) as Orders, Side from orderData
+    orderSell = select TradeTime, SecurityID, ImageStatus, Orders as OfferOrders from orderData where Side = 'S' and isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+    orderBuy = select TradeTime, SecurityID, ImageStatus, Orders as BidOrders from orderData where Side = 'B' and isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+    orderData = lj(orderSell, orderBuy, `TradeTime`SecurityID`ImageStatus)
+    return orderData
+}
+
+def loadOrderDataSnapshotSZ(day, market, filePath){
+    tmp = filePath.split('/')
+    fileDir = concat(tmp[:tmp.size()-1], '/')
+
+    if(day < 2016.05.07){
+        orderData = ploadText(fileDir + '/' + files(fileDir, "%OrderQueue.csv").filename[0], schema=orderQueueCsvSchema())
+        orderData = select ImageStatus.nullFill(1) as ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, 
+            fixedLengthArrayVector(OrderQty1, OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, 
+            OrderQty10, OrderQty11, OrderQty12, OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, 
+            OrderQty20, OrderQty21, OrderQty22, OrderQty23, OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, 
+            OrderQty30, OrderQty31, OrderQty32, OrderQty33, OrderQty34, OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, 
+            OrderQty40, OrderQty41, OrderQty42, OrderQty43, OrderQty44, OrderQty45, OrderQty46, OrderQty47, OrderQty48, OrderQty49, 
+            OrderQty50) as Orders, Side from orderData
+        orderSell = select ImageStatus, TradeTime, SecurityID, Orders as OfferOrders from orderData where Side = `S and isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+        orderBuy = select ImageStatus, TradeTime, SecurityID, Orders as BidOrders from orderData where Side = `B and  isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+    }
+    else{
+        orderSell = ploadText(fileDir + '/' + files(fileDir, "%mdl_6_28_1.csv").filename[0], schema=orderQueueCsvSchema())
+        orderSell = select ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, fixedLengthArrayVector(OrderQty1, 
+            OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, OrderQty10, OrderQty11, OrderQty12, 
+            OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, OrderQty20, OrderQty21, OrderQty22, OrderQty23, 
+            OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, OrderQty30, OrderQty31, OrderQty32, OrderQty33, OrderQty34, 
+            OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, OrderQty40, OrderQty41, OrderQty42, OrderQty43, OrderQty44, OrderQty45, 
+            OrderQty46, OrderQty47, OrderQty48, OrderQty49, OrderQty50) as OfferOrders from orderSell
+        orderSell = select * from orderSell where isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+        orderBuy = ploadText(fileDir + '/' + files(fileDir, "%mdl_6_28_2.csv").filename[0], schema=orderQueueCsvSchema())
+        orderBuy = select ImageStatus, concatDateTime(day, TradeTime) as TradeTime, SecurityID, fixedLengthArrayVector(OrderQty1, 
+            OrderQty2, OrderQty3, OrderQty4, OrderQty5, OrderQty6, OrderQty7, OrderQty8, OrderQty9, OrderQty10, OrderQty11, OrderQty12, 
+            OrderQty13, OrderQty14, OrderQty15, OrderQty16, OrderQty17, OrderQty18, OrderQty19, OrderQty20, OrderQty21, OrderQty22, OrderQty23, 
+            OrderQty24, OrderQty25, OrderQty26, OrderQty27, OrderQty28, OrderQty29, OrderQty30, OrderQty31, OrderQty32, OrderQty33, OrderQty34, 
+            OrderQty35, OrderQty36, OrderQty37, OrderQty38, OrderQty39, OrderQty40, OrderQty41, OrderQty42, OrderQty43, OrderQty44, OrderQty45, 
+            OrderQty46, OrderQty47, OrderQty48, OrderQty49, OrderQty50) as BidOrders from orderBuy
+        orderBuy = select * from orderBuy where isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+    }
+    orderData = lj(orderSell, orderBuy, `TradeTime`SecurityID`ImageStatus)
+    return orderData
+}
+
+/**
+* Transform the data before inserting into the database.
+*/
+def renderTransformedDataEntrustAll(dbName, tbName, filePath, mutable t, day, market){
+    t = select * from t
+    if (market == "SH"){
+        t = select ChannelNo, ApplSeqNum, string(NULL) as MDStreamID, SecurityID, string(NULL) as SecurityIDSource, Price, OrderQty, Side, concatDateTime(day, TradeTime) as TradeTime, OrderType, LocalTime, SeqNo, OrderNO, DataStatus, BizIndex, "SH" as Market from t where isDuplicated([ApplSeqNum, ChannelNo], LAST)=false
+    }else{
+        if(day < 2016.05.07){
+			t = select ChannelNo, ApplSeqNum, string(NULL) as MDStreamID, SecurityID, string(NULL) as SecurityIDSource, Price, OrderQty, Side, concatDateTime(day, TradeTime) as TradeTime, OrderType, LocalTime, SeqNo, int(NULL) as OrderNO, int(NULL) as DataStatus, long(NULL) as BizIndex, "SZ" as Market  from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false	
+		}else{
+			t = select ChannelNo, ApplSeqNum, MDStreamID, SecurityID, SecurityIDSource, Price, OrderQty, string(char(Side)) as Side, concatDateTime(day, TradeTime) as TradeTime, string(char(OrderType)) as OrderType, LocalTime, SeqNo, int(NULL) as OrderNO, int(NULL) as DataStatus, long(NULL) as BizIndex, "SZ" as Market  from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false	
+		}
+    }
+    loadTable(dbName, tbName).append!(t)
+    t = NULL
+}
+def renderTransformedDataEntrustSH(dbName, tbName, filePath, mutable t, day, market){
+    t = select * from t
+    t = select * from t where isDuplicated([ApplSeqNum, ChannelNo], LAST)=false
+	t.replaceColumn!(`TradeTime, concatDateTime(day, t.TradeTime))
+    loadTable(dbName, tbName).append!(t)
+    t = NULL
+}
+def renderTransformedDataEntrustSZ(dbName, tbName, filePath, mutable t, day, market){
+    t = select * from t
+    if(day < 2016.05.07){
+        t = select ChannelNo, ApplSeqNum, string(NULL) as MDStreamID, SecurityID, string(NULL) as SecurityIDSource, Price, OrderQty, Side, concatDateTime(day, TradeTime) as TradeTime, OrderType, LocalTime, SeqNo from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false	
+    }else{
+        t = select ChannelNo, ApplSeqNum, MDStreamID, SecurityID, SecurityIDSource, Price, OrderQty, string(char(Side)) as Side, concatDateTime(day, TradeTime) as TradeTime, string(char(OrderType)) as OrderType, LocalTime, SeqNo from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false	
+    }
+    loadTable(dbName, tbName).append!(t)
+    t = NULL
+}
+def renderTransformedDataTradeAll(dbName, tbName, filePath, mutable t, day, market){
+    t = select * from t
+    if (market == "SH"){
+        if(day < 2021.04.26){
+            t = select ChannelNo, ApplSeqNum, string(NULL) as MDStreamID, BidApplSeqNum, OfferApplSeqNum, SecurityID, string(NULL) as SecurityIDSource, TradePrice, TradeQty, string(NULL) as ExecType, concatDateTime(day, TradeTime) as TradeTime, LocalTime, SeqNo, DataStatus, TradeMoney, TradeBSFlag, long(NULL) as BizIndex, string(NULL) as OrderKind, "SH" as Market from t where isDuplicated([ApplSeqNum, ChannelNo], LAST)=false
+        }else{
+            t = select ChannelNo, ApplSeqNum, string(NULL) as MDStreamID, BidApplSeqNum, OfferApplSeqNum, SecurityID, string(NULL) as SecurityIDSource, TradePrice, TradeQty, string(NULL) as ExecType, concatDateTime(day, TradeTime) as TradeTime, LocalTime, SeqNo, DataStatus, TradeMoney, TradeBSFlag, BizIndex, string(NULL) as OrderKind, "SH" as Market from t where isDuplicated([ApplSeqNum, ChannelNo], LAST)=false
+        }	
+    }else{
+        if(day < 2016.05.07){
+            t = select ChannelNo, ApplSeqNum, string(NULL) as MDStreamID, BidApplSeqNum, OfferApplSeqNum, SecurityID, string(NULL) as SecurityIDSource, TradePrice, TradeQty, ExecType, concatDateTime(day, TradeTime) as TradeTime, LocalTime, SeqNo, int(NULL) as DataStatus, double(NULL) as TradeMoney, string(NULL) as TradeBSFlag, long(NULL) as BizIndex, OrderKind, "SZ" as Market from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false
+        }else{
+            t = select ChannelNo, ApplSeqNum, MDStreamID, BidApplSeqNum, OfferApplSeqNum, SecurityID, SecurityIDSource, TradePrice, TradeQty, string(char(ExecType)) as ExecType, concatDateTime(day, TradeTime) as TradeTime, LocalTime, SeqNo, int(NULL) as DataStatus, double(NULL) as TradeMoney, string(NULL) as TradeBSFlag, long(NULL) as BizIndex, string(NULL) as OrderKind, "SZ" as Market from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false
+        }	
+    }
+    loadTable(dbName, tbName).append!(t)
+    t = NULL
+}
+def renderTransformedDataTradeSH(dbName, tbName, filePath, mutable t, day, market){
+    t = select * from t
+    if(day < 2021.04.26){
+        t = select DataStatus, ApplSeqNum, ChannelNo, SecurityID, concatDateTime(take(day, count(*)), TradeTime) as TradeTime, TradePrice, TradeQty, TradeMoney, BidApplSeqNum, OfferApplSeqNum, TradeBSFlag, long(NULL) as BizIndex, LocalTime, SeqNo from t where isDuplicated([ApplSeqNum, ChannelNo], LAST)=false
+    }else{
+        t = select DataStatus, ApplSeqNum, ChannelNo, SecurityID, concatDateTime(take(day, count(*)), TradeTime) as TradeTime, TradePrice, TradeQty, TradeMoney, BidApplSeqNum, OfferApplSeqNum, TradeBSFlag, BizIndex, LocalTime, SeqNo from t where isDuplicated([ApplSeqNum, ChannelNo], LAST)=false
+    }
+    loadTable(dbName, tbName).append!(t)
+    t = NULL
+}
+def renderTransformedDataTradeSZ(dbName, tbName, filePath, mutable t, day, market){
+    t = select * from t
+    if(day < 2016.05.07){
+        t = select ChannelNo, ApplSeqNum, string(NULL) as MDStreamID, BidApplSeqNum, OfferApplSeqNum, SecurityID, string(NULL) as SecurityIDSource, TradePrice, TradeQty, ExecType, concatDateTime(day, TradeTime) as TradeTime, LocalTime, SeqNo, OrderKind from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false
+    }else{
+        t = select ChannelNo, ApplSeqNum, MDStreamID, BidApplSeqNum, OfferApplSeqNum, SecurityID, SecurityIDSource, TradePrice, TradeQty, string(char(ExecType)) as ExecType, concatDateTime(day, TradeTime) as TradeTime, LocalTime, SeqNo, string(NULL) as OrderKind from t where isDuplicated([ChannelNo, ApplSeqNum], LAST)=false
+    }
+    loadTable(dbName, tbName).append!(t)
+    t = NULL
+}
+def renderTransformedDataSnapshotAll(dbName, tbName, filePath, mutable t, day, market){
+    //snapshot
+    if(market == 'SH'){
+        if(day < 2019.06.06){
+            t =  select 'SH' as Market, concatDateTime(day, TradeTime) as TradeTime, string(NULL) as MDStreamID, SecurityID, string(NULL) as SecurityIDSource, 
+                        TradingPhaseCode, ImageStatus, PreCloPrice, NumTrades, TotalVolumeTrade, TotalValueTrade, LastPrice, OpenPrice, HighPrice, LowPrice, 
+                        ClosePrice, double(NULL) as DifPrice1, double(NULL) as DifPrice2, double(NULL) as PE1, double(NULL) as PE2, double(NULL) as PreCloseIOPV, 
+                        IOPV, TotalBidQty, WeightedAvgBidPx, AltWAvgBidPri, TotalOfferQty, WeightedAvgOfferPx, AltWAvgAskPri, UpLimitPx, DownLimitPx, int(NULL) as OpenInt, double(NULL) as  OptPremiumRatio, 
+                        fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+                        fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+                        fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+                        fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+                        fixedLengthArrayVector(take(double(NULL),t.size())) as BidNumOrders, fixedLengthArrayVector(take(double(NULL),t.size())) as OfferNumOrders, 
+                        ETFBuyNumber, ETFBuyAmount, ETFBuyMoney, ETFSellNumber, ETFSellAmount, ETFSellMoney, YieldToMatu, TotWarExNum, WithdrawBuyNumber, WithdrawBuyAmount, WithdrawBuyMoney, 
+                        WithdrawSellNumber, WithdrawSellAmount, WithdrawSellMoney, TotalBidNumber, TotalOfferNumber, MaxBidDur, MaxSellDur, BidNum, SellNum, LocalTime, SeqNo 
+                   from t
+        }
+        else{
+            t =  select 'SH' as Market, concatDateTime(day, TradeTime) as TradeTime, string(NULL) as MDStreamID, SecurityID, string(NULL) as SecurityIDSource, 
+                        TradingPhaseCode, ImageStatus, PreCloPrice, NumTrades, TotalVolumeTrade, TotalValueTrade, LastPrice, OpenPrice, HighPrice, LowPrice, 
+                        ClosePrice, double(NULL) as DifPrice1, double(NULL) as DifPrice2, double(NULL) as PE1, double(NULL) as PE2,
+                        double(NULL) as PreCloseIOPV, IOPV, TotalBidQty, WeightedAvgBidPx, AltWAvgBidPri, 
+                        TotalOfferQty, WeightedAvgOfferPx, AltWAvgAskPri, UpLimitPx, DownLimitPx, int(NULL) as OpenInt, double(NULL) as  OptPremiumRatio, 
+                        fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+                        fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+                        fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+                        fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+                        fixedLengthArrayVector(NumOrdersB1,NumOrdersB2,NumOrdersB3,NumOrdersB4,NumOrdersB5,NumOrdersB6,NumOrdersB7,NumOrdersB8,NumOrdersB9,NumOrdersB10) as BidNumOrders, 
+                        fixedLengthArrayVector(NumOrdersS1,NumOrdersS2,NumOrdersS3,NumOrdersS4,NumOrdersS5,NumOrdersS6,NumOrdersS7,NumOrdersS8,NumOrdersS9,NumOrdersS10) as OfferNumOrders, 
+                        ETFBuyNumber, ETFBuyAmount, ETFBuyMoney, ETFSellNumber, ETFSellAmount, ETFSellMoney, YieldToMatu, TotWarExNum, WithdrawBuyNumber, WithdrawBuyAmount, WithdrawBuyMoney, 
+                        WithdrawSellNumber, WithdrawSellAmount, WithdrawSellMoney, TotalBidNumber, TotalOfferNumber, MaxBidDur, MaxSellDur, BidNum, SellNum, LocalTime, SeqNo 
+                   from t
+        }
+    }
+    else{
+        if(day < 2016.05.07){
+            t = select 'SZ' as Market, concatDateTime(day, TradeTime) as TradeTime, string(NULL) as MDStreamID, 
+                        SecurityID, string(NULL) as SecurityIDSource, TradingPhaseCode, int(1) as ImageStatus, PreCloPrice, 
+                        NumTrades, TotalVolumeTrade, TotalValueTrade, LastPrice, OpenPrice, HighPrice, LowPrice, double(NULL) as ClosePrice, 
+                        double(NULL) as DifPrice1, double(NULL) as DifPrice2, PE1, PE2, double(NULL) as PreCloseIOPV, double(NULL) as IOPV, 
+                        TotalBidQty, WeightedAvgBidPx, double(NULL) as AltWAvgBidPri, TotalOfferQty, WeightedAvgOfferPx, double(NULL) as AltWAvgAskPri, 
+                        double(NULL) as UpLimitPx, double(NULL) as DownLimitPx, OpenInt, double(NULL) as OptPremiumRatio, 
+                        fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+                        fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+                        fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+                        fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+                        fixedLengthArrayVector(take(double(NULL), t.size())) as BidNumOrders, 
+                        fixedLengthArrayVector(take(double(NULL),t.size())) as OfferNumOrders, 
+                        int(NULL) as ETFBuyNumber, int(NULL) as ETFBuyAmount, double(NULL) as ETFBuyMoney, int(NULL) as ETFSellNumber, int(NULL) as ETFSellAmount, 
+                        double(NULL) as ETFSellMoney, double(NULL) as YieldToMatu, double(NULL) as TotWarExNum, int(NULL) as WithdrawBuyNumber, int(NULL) as WithdrawBuyAmount, 
+                        double(NULL) as WithdrawBuyMoney, int(NULL) as WithdrawSellNumber, int(NULL) as WithdrawSellAmount, double(NULL) as WithdrawSellMoney, 
+                        int(NULL) as TotalBidNumber, int(NULL) as TotalOfferNumber, int(NULL) as MaxBidDur, int(NULL) as MaxSellDur, int(NULL) as BidNum, int(NULL) as SellNum, LocalTime, SeqNo 
+                  from t
+        }else if(day < 2019.06.05){
+            t = select 'SZ' as Market, concatDateTime(day, TradeTime) as TradeTime, MDStreamID, SecurityID, SecurityIDSource, TradingPhaseCode, int(1) as ImageStatus, PreCloPrice, NumTrades, 
+                        TotalVolumeTrade, TotalValueTrade, LastPrice, OpenPrice, HighPrice, LowPrice, double(NULL) as ClosePrice, DifPrice1, DifPrice2, PE1, PE2, PreCloseIOPV, IOPV, TotalBidQty, 
+                        WeightedAvgBidPx, double(NULL) as AltWAvgBidPri, TotalOfferQty, WeightedAvgOfferPx, double(NULL) as AltWAvgAskPri, UpLimitPx, DownLimitPx, OpenInt, OptPremiumRatio, 
+                        fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+                        fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+                        fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+                        fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+                        fixedLengthArrayVector(take(double(NULL),t.size())) as BidNumOrders, 
+                        fixedLengthArrayVector(take(double(NULL),t.size())) as OfferNumOrders, int(NULL) as ETFBuyNumber, int(NULL) as ETFBuyAmount, double(NULL) as ETFBuyMoney, 
+                        int(NULL) as ETFSellNumber, int(NULL) as ETFSellAmount, double(NULL) as ETFSellMoney, double(NULL) as YieldToMatu, double(NULL) as TotWarExNum, int(NULL) as WithdrawBuyNumber, 
+                        int(NULL) as WithdrawBuyAmount, double(NULL) as WithdrawBuyMoney, int(NULL) as WithdrawSellNumber, int(NULL) as WithdrawSellAmount, double(NULL) as WithdrawSellMoney, 
+                        int(NULL) as TotalBidNumber, int(NULL) as TotalOfferNumber, int(NULL) as MaxBidDur, int(NULL) as MaxSellDur, int(NULL) as BidNum, int(NULL) as SellNum, LocalTime, SeqNo 
+                  from t
+        }else{
+            t = select 'SZ' as Market, concatDateTime(day, TradeTime) as TradeTime, MDStreamID, SecurityID, SecurityIDSource, TradingPhaseCode, int(1) as ImageStatus, PreCloPrice, NumTrades, 
+                        TotalVolumeTrade, TotalValueTrade, LastPrice, OpenPrice, HighPrice, LowPrice, double(NULL) as ClosePrice, DifPrice1, DifPrice2, PE1, PE2, PreCloseIOPV, IOPV, TotalBidQty, 
+                        WeightedAvgBidPx, double(NULL) as AltWAvgBidPri, TotalOfferQty, WeightedAvgOfferPx, double(NULL) as AltWAvgAskPri, UpLimitPx, DownLimitPx, OpenInt, OptPremiumRatio, 
+                        fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+                        fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+                        fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+                        fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+                        fixedLengthArrayVector(NumOrdersB1,NumOrdersB2,NumOrdersB3,NumOrdersB4,NumOrdersB5,NumOrdersB6,NumOrdersB7,NumOrdersB8,NumOrdersB9,NumOrdersB10) as BidNumOrders, 
+                        fixedLengthArrayVector(NumOrdersS1,NumOrdersS2,NumOrdersS3,NumOrdersS4,NumOrdersS5,NumOrdersS6,NumOrdersS7,NumOrdersS8,NumOrdersS9,NumOrdersS10) as OfferNumOrders, 
+                        int(NULL) as ETFBuyNumber, int(NULL) as ETFBuyAmount, double(NULL) as ETFBuyMoney, int(NULL) as ETFSellNumber, int(NULL) as ETFSellAmount, double(NULL) as ETFSellMoney, 
+                        double(NULL) as YieldToMatu, double(NULL) as TotWarExNum, int(NULL) as WithdrawBuyNumber, int(NULL) as WithdrawBuyAmount, double(NULL) as WithdrawBuyMoney, 
+                        int(NULL) as WithdrawSellNumber, int(NULL) as WithdrawSellAmount, double(NULL) as WithdrawSellMoney, int(NULL) as TotalBidNumber, int(NULL) as TotalOfferNumber, 
+                        int(NULL) as MaxBidDur, int(NULL) as MaxSellDur, int(NULL) as BidNum, int(NULL) as SellNum, LocalTime, SeqNo 
+                  from t
+        }
+    }
+    t = select * from t where isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+
+    // order
+    orderData = loadOrderDataSnapshotAll(day, market, filePath)
+    securityID = t.SecurityID.distinct()
+    hashNum = loadTable(dbName, tbName).schema().partitionSchema[1]
+    ploop(joinSnapOrder{ , securityID, t, orderData, dbName, tbName, hashNum}, 0..(hashNum-1))
+    return NULL
+}
+def renderTransformedDataSnapshotSH(dbName, tbName, filePath, mutable t, day, market){
+    //snapshot
+    if(day < 2019.06.06){
+        t =  select concatDateTime(day, TradeTime) as TradeTime, SecurityID, ImageStatus, PreCloPrice, OpenPrice, HighPrice, LowPrice, 
+        LastPrice, ClosePrice, TradingPhaseCode, NumTrades, TotalVolumeTrade, TotalValueTrade, TotalBidQty, WeightedAvgBidPx, AltWAvgBidPri, 
+        TotalOfferQty, WeightedAvgOfferPx, AltWAvgAskPri, ETFBuyNumber, ETFBuyAmount, ETFBuyMoney, ETFSellNumber, ETFSellAmount, ETFSellMoney, 
+        YieldToMatu, TotWarExNum, UpLimitPx, DownLimitPx, WithdrawBuyNumber, WithdrawBuyAmount, WithdrawBuyMoney, WithdrawSellNumber, 
+        WithdrawSellAmount, WithdrawSellMoney, TotalBidNumber, TotalOfferNumber, MaxBidDur, MaxSellDur, BidNum, SellNum, IOPV, 
+        fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+        fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+        fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+        fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+        fixedLengthArrayVector(take(double(NULL),t.size())) as BidNumOrders, fixedLengthArrayVector(take(double(NULL),t.size())) as OfferNumOrders, 
+        LocalTime, SeqNo from t
+    }
+    else{
+        t = select concatDateTime(day, TradeTime) as TradeTime, SecurityID, ImageStatus, PreCloPrice, OpenPrice, HighPrice, LowPrice, LastPrice, ClosePrice, 
+        TradingPhaseCode, NumTrades, TotalVolumeTrade, TotalValueTrade, TotalBidQty, WeightedAvgBidPx, AltWAvgBidPri, TotalOfferQty, WeightedAvgOfferPx, AltWAvgAskPri, 
+        ETFBuyNumber, ETFBuyAmount, ETFBuyMoney, ETFSellNumber, ETFSellAmount, ETFSellMoney, YieldToMatu, TotWarExNum, UpLimitPx, DownLimitPx, WithdrawBuyNumber, 
+        WithdrawBuyAmount, WithdrawBuyMoney, WithdrawSellNumber, WithdrawSellAmount, WithdrawSellMoney, TotalBidNumber, TotalOfferNumber, MaxBidDur, MaxSellDur, BidNum, 
+        SellNum, IOPV, fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+        fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+        fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+        fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+        fixedLengthArrayVector(NumOrdersB1,NumOrdersB2,NumOrdersB3,NumOrdersB4,NumOrdersB5,NumOrdersB6,NumOrdersB7,NumOrdersB8,NumOrdersB9,NumOrdersB10) as BidNumOrders, 
+        fixedLengthArrayVector(NumOrdersS1,NumOrdersS2,NumOrdersS3,NumOrdersS4,NumOrdersS5,NumOrdersS6,NumOrdersS7,NumOrdersS8,NumOrdersS9,NumOrdersS10) as OfferNumOrders, 
+        LocalTime, SeqNo from t
+    }
+    t = select * from t where isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+    // order
+    orderData = loadOrderDataSnapshotSH(day, market, filePath)
+    securityID = t.SecurityID.distinct()
+    hashNum = loadTable(dbName, tbName).schema().partitionSchema[1]
+    ploop(joinSnapOrder{ , securityID, t, orderData, dbName, tbName, hashNum}, 0..(hashNum-1))
+    return NULL
+}
+def renderTransformedDataSnapshotSZ(dbName, tbName, filePath, mutable t, day, market){
+    //snapshot
+    if(day < 2016.05.07){
+        t = select int(1) as ImageStatus, concatDateTime(day, TradeTime) as TradeTime, string(NULL) as MDStreamID, 
+            SecurityID, string(NULL) as SecurityIDSource, TradingPhaseCode, PreCloPrice, NumTrades, TotalVolumeTrade, TotalValueTrade, 
+            LastPrice, OpenPrice, HighPrice, LowPrice, double(NULL) as DifPrice1, double(NULL) as DifPrice2, PE1, PE2, double(NULL) as PreCloseIOPV, 
+            double(NULL) as IOPV, TotalBidQty, WeightedAvgBidPx, TotalOfferQty, WeightedAvgOfferPx, double(NULL) as UpLimitPx, double(NULL) as DownLimitPx, 
+            OpenInt, double(NULL) as OptPremiumRatio, fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,
+            AskPrice9,AskPrice10) as OfferPrice, fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,
+            BidPrice9,BidPrice10) as BidPrice, fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,
+            AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,
+            BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, fixedLengthArrayVector(take(double(NULL), t.size())) as BidNumOrders, 
+            fixedLengthArrayVector(take(double(NULL),t.size())) as OfferNumOrders, LocalTime, SeqNo 
+            from t
+    }else if(day < 2019.06.05){
+        t = select int(1) as ImageStatus, concatDateTime(day, TradeTime) as TradeTime, MDStreamID, SecurityID, SecurityIDSource, 
+            TradingPhaseCode, PreCloPrice, NumTrades, TotalVolumeTrade, TotalValueTrade, LastPrice, OpenPrice, HighPrice, LowPrice, DifPrice1, 
+            DifPrice2, PE1, PE2, PreCloseIOPV, IOPV, TotalBidQty, WeightedAvgBidPx, TotalOfferQty, WeightedAvgOfferPx, UpLimitPx, DownLimitPx, 
+            OpenInt, OptPremiumRatio, fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,
+            AskPrice9,AskPrice10) as OfferPrice, fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,
+            BidPrice8,BidPrice9,BidPrice10) as BidPrice, fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,
+            AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,
+            BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+            fixedLengthArrayVector(take(double(NULL), t.size())) as BidNumOrders, 
+            fixedLengthArrayVector(take(double(NULL),t.size())) as OfferNumOrders, LocalTime, SeqNo 
+            from t
+    }else{
+        t = select int(1) as ImageStatus, concatDateTime(day, TradeTime) as TradeTime, MDStreamID, SecurityID, SecurityIDSource, TradingPhaseCode, 
+            PreCloPrice, NumTrades, TotalVolumeTrade, TotalValueTrade, LastPrice, OpenPrice, HighPrice, LowPrice, DifPrice1, DifPrice2, PE1, PE2, 
+            PreCloseIOPV, IOPV, TotalBidQty, WeightedAvgBidPx, TotalOfferQty, WeightedAvgOfferPx, UpLimitPx, DownLimitPx, OpenInt, OptPremiumRatio, 
+            fixedLengthArrayVector(AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskPrice6,AskPrice7,AskPrice8,AskPrice9,AskPrice10) as OfferPrice, 
+            fixedLengthArrayVector(BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidPrice6,BidPrice7,BidPrice8,BidPrice9,BidPrice10) as BidPrice, 
+            fixedLengthArrayVector(AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,AskVolume6,AskVolume7,AskVolume8,AskVolume9,AskVolume10) as OfferOrderQty, 
+            fixedLengthArrayVector(BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,BidVolume6,BidVolume7,BidVolume8,BidVolume9,BidVolume10) as BidOrderQty, 
+            fixedLengthArrayVector(NumOrdersB1,NumOrdersB2,NumOrdersB3,NumOrdersB4,NumOrdersB5,NumOrdersB6,NumOrdersB7,NumOrdersB8,NumOrdersB9,NumOrdersB10) as BidNumOrders, 
+            fixedLengthArrayVector(NumOrdersS1,NumOrdersS2,NumOrdersS3,NumOrdersS4,NumOrdersS5,NumOrdersS6,NumOrdersS7,NumOrdersS8,NumOrdersS9,NumOrdersS10) as OfferNumOrders, 
+            LocalTime, SeqNo 
+            from t
+    }
+    t = select * from t where isDuplicated([TradeTime, SecurityID, ImageStatus], LAST)=false
+
+    // order
+    orderData = loadOrderDataSnapshotSZ(day, market, filePath)
+    securityID = t.SecurityID.distinct()
+    hashNum = loadTable(dbName, tbName).schema().partitionSchema[1]
+    ploop(joinSnapOrder{ , securityID, t, orderData, dbName, tbName, hashNum}, 0..(hashNum-1))
+    return NULL
+}

@@ -1,0 +1,37 @@
+def sql_with_groupby(data, startDate, endDate, factorName, oriName, tarName, securityidName, tradetimeName){
+    // 该计算模板以SQL的方式调用因子模块代码，并进行group by分组
+    oriname = oriName.strReplace(" ","")
+    tarname = tarName.strReplace(" ","")
+    // 依据 tradetime and securityid 选出数据
+    // 找出因子函数所需参数
+    param = facplf_find_func_params(factorName)
+    // 依据原始列名，因子函数列名映射
+    // 依据逗号分隔
+    ori = oriname.split(",")
+    tar = tarname.split(",")
+    // 映射过程的index
+    indexF = tar in param 
+    indexS = param in tar
+    // 将原始列名映射到函数所需列名
+    param[indexS] = ori[indexF]
+    // 创建元编程代码
+    args = each(sqlCol, param)
+    // 将指定值转成int型
+    args[!isNull(int(ori[indexF]))] = int(ori[indexF][!isNull(int(ori[indexF]))])
+    // sql 元代码
+    // 选择所有代码并进行因子计算
+    selects = (sqlColAlias(sqlCol(tradetimeName),`tradetime), sqlColAlias(sqlCol(securityidName),`securityid),
+                sqlColAlias(makeUnifiedCall(funcByName("string"), factorName), "factorname"),
+                sqlColAlias(makeUnifiedCall(funcByName(factorName), args),"value"))
+    from_tb = data
+    whereConditions = expr(startDate, <=, sqlCol(tradetimeName), <=, endDate)
+    ret = sql(
+        select = selects,
+        from = from_tb,
+        where = whereConditions,
+        groupBy=[sqlColAlias(makeUnifiedCall(date,sqlCol(tradetimeName))), sqlCol(securityidName)],
+        groupFlag = 1
+    )
+    return ret.eval()
+
+}

@@ -1,0 +1,761 @@
+// 获得所有用户最新数据
+def facplf_get_mgmt_users() {
+    user_info = loadTable("dfs://mgmt_user_info", "user_info")
+    all_users = select * from user_info context by username limit -1
+    all_users = select * from all_users where isDeleted = false
+    return all_users
+}
+
+// 查询用户列表
+// 【admin】查询员工的用户信息
+def facplf_get_all_user_info(user) {// user = param.username
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+    dept_name = loadTable("dfs://mgmt_dept_name", "dept_name")
+    user_access = loadTable("dfs://mgmt_user_access","user_access")
+    all_users = facplf_get_mgmt_users()
+    departments = array(ANY)
+    //用户个人信息
+    user_info = select * from all_users where username = user and isActivated = true
+    if (count(user_info) == 0) {
+        throw toStdJson({ code: 'S004'})// message: 该用户不存在
+    }
+    //用户部门信息
+    dept_info = select * from dept_info where username = user context by deptName limit -1
+    //用户列表
+    user_list = exec username from all_users where isActivated = true
+
+    try{
+        // 找每个部门信息
+        distinct_dept = exec distinct(deptName) from dept_info;
+        for (dept in distinct_dept) {// dept = distinct_dept[0]
+            dept_tmp = select * from dept_info where deptName = dept
+            department = dict(STRING, ANY)
+            dept_nickname = exec last(nickname) from dept_name where deptName = dept
+            department["nickname"] = dept_nickname
+            department["name"] = dept
+            department["is_admin"] = dept_tmp.isDeptAdmin[0]
+            auths = array(int)
+            if (dept_tmp.isDeptReviewer == true) {auths.append!(4)}
+            if (dept_tmp.isDeptFacEditor == true) {auths.append!(1)}
+            if (dept_tmp.isDeptImporter == true) {auths.append!(3)}
+            if (dept_tmp.isDeptStrategist == true) {auths.append!(2)}
+            department["auths"] = auths
+            access_tbs = select * from user_access where deptName = dept and username = user;
+            access_tbs = select * from access_tbs where isDuplicated([username,dbName,tableName],LAST)=false;
+            access_tbs = select dbName as database, tableName as table from access_tbs where isDeleted = false;
+            department["access_tables"] =  access_tbs
+            departments.append!(department)
+        }
+        res = dict(STRING, ANY)
+        res["username"] = user
+        res["active_time"] = user_info.activateTime[0]
+        auths = array(int)
+        if (user_info.isImporter == true) {auths. append!(3) }
+        if (user_info.isReviewer == true) {auths.append!(4)}
+        res["system_auths"] = auths
+        res["is_admin"] = iif(user=="admin", true, false)
+        res["is_active"] = user_info.isActivated[0]
+        res["departments"] = departments
+        return res
+    }catch(ex) {
+        throw toStdJson({code: 'S002'})
+    }
+}
+
+
+// 【部门管理员】查询我部门下面所有的用户信息
+def facplf_get_my_dept_info(deptUser) {// deptUser = param.username
+    user = getCurrentSessionAndUser()[1]
+    dept_tb = loadTable("dfs://mgmt_dept_info", "dept_info")
+    dept_name = loadTable("dfs://mgmt_dept_name", "dept_name")
+    user_access = loadTable("dfs://mgmt_user_access","user_access")
+    all_users = facplf_get_mgmt_users()
+    departments = array(ANY)
+    try{
+        // 我管理的部门
+        dept_list = exec deptName from dept_tb where isDeptAdmin = true and username = user context by deptName limit -1;
+        // 查看部门下面的成员
+        user_list = exec distinct(username) from dept_tb where deptName in dept_list;
+        if (!(deptUser in user_list)) {throw toStdJson({code: 'S001'})}// message: 不具备该权限
+        // 用户个人信息
+        user_info = select * from all_users where username = deptUser and isActivated = true and isDeleted = false;
+
+        // user_list = select username from all_users where isDeleted = false and isActivated = true
+        dept_tb = select * from dept_tb where username in user_list and isDuplicated([username, deptName], LAST) = false;
+        dept_info = exec * from dept_tb d where d.username = deptUser and deptName in dept_list
+
+        
+        distinct_dept = exec distinct(deptName) from dept_info;
+        for (dept in distinct_dept) {// dept = distinct_dept[0]
+            // dept = 'dept1'
+            dept_tmp = exec * from dept_info where deptName = dept
+            department = dict(STRING, ANY)
+            dept_nickname = exec last(nickname) from dept_name where deptName = dept
+            department["nickname"] = dept_nickname
+            department["name"] = dept
+            department["is_admin"] = dept_tmp.isDeptAdmin[0]
+            auths = array(int)
+            if (dept_tmp.isDeptReviewer == true) { auths. append!(4) }
+            if (dept_tmp.isDeptFacEditor == true) {auths.append!(1)}
+            if (dept_tmp.isDeptImporter == true) {auths.append!(3)}
+            if (dept_tmp.isDeptStrategist == true) {auths.append!(2)}
+            department["auths"] = auths
+
+            access_tbs = select * from user_access where deptName = dept and username = deptUser;
+            access_tbs = select * from access_tbs where isDuplicated([username,dbName,tableName],LAST)=false;
+            access_tbs = select dbName as database, tableName as table from access_tbs where isDeleted = false;
+            department["access_tables"] =  access_tbs
+            departments.append!(department)
+        }
+        res = dict(STRING, ANY)
+        res["username"] = deptUser
+        res["active_time"] = user_info.activateTime[0]
+        auths = array(int)
+        if (user_info.isImporter == true) { auths. append!(3) }
+        if (user_info.isReviewer == true) {auths.append!(4)}
+        res["system_auths"] = auths
+        res["is_admin"] = iif(deptUser=="admin", true, false)
+        res["is_active"] = user_info.isActivated[0]
+        res["departments"] = departments
+        return res
+    }catch(ex) {
+        throw toStdJson({code: 'S002'})// message: 该用户已被禁用或删除
+    }
+}
+
+// 查询用户列表
+def facplf_get_user_list(param) {
+    user = getCurrentSessionAndUser()[1]
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+    user_info = loadTable("dfs://mgmt_user_info", "user_info")
+
+    //参数检查
+    if (!isVoid(param.department_names)) {
+        if(all(typestr(param.department_names) != "STRING") and (typestr(param.department_names) != "STRING VECTOR")) {
+            throw toStdJson({ code: 'S072'})
+        }
+    }
+    res = array(ANY)
+    all_users = exec username from facplf_get_mgmt_users() where isActivated = true
+    if (user == 'admin') {
+        if (size(param.department_names)!=0) {
+            if (!isVoid(param.department_names)) {
+                // 取出部门下所有的用户
+                user_list = exec distinct(username) from loadTable("dfs://mgmt_dept_info", "dept_info") where deptName in string(param.department_names) and username in all_users
+                for (user in user_list) {
+                    tmp = facplf_get_all_user_info(user)
+                    res.append!(tmp)
+                }
+            } else {
+                // 返回所有用户
+                for (users in all_users) {//users = all_users[0]
+                    tmp = facplf_get_all_user_info(users)
+                    res.append!(tmp)
+                }
+            }
+        } else if (size(param.department_names)==0) {
+            // 返回所有不在部门下的用户
+            // 找到部门下的用户
+            dept_users = exec distinct(username) from dept_info
+            // all_users
+            all_users = exec * from user_info context by username limit -1
+            users = exec * from all_users where isDeleted = false and isActivated = true
+            non_depart_users = exec username from users where not username in dept_users
+            for (user in non_depart_users) {
+                if (user!='admin') {
+                    tmp = facplf_get_all_user_info(user)
+                    res.append!(tmp)
+                }
+            }
+        }
+
+
+        if (param.include_not_activated) {
+            allusers = table(rpc(getControllerAlias(), getUserList) as username)
+            users = exec * from user_info context by username limit -1
+            users = select * from users where isDeleted = false and username != 'admin' and isActivated = true;
+            not_active_users = exec username from allusers as a left join users u on u.username = a.username where u.username is null
+            for (user in not_active_users) {
+                tmp = dict(STRING, ANY)
+                tmp["username"] = user
+                res.append!(tmp)
+            }
+        }
+    }else if (`dept_admin in rpc(getControllerAlias(), getUserAccess).groups.split(",").flatten()) {
+        if (count(param.department_names)!=0) {
+            //检查参数是否为当前用户为部门admin的部门
+            deptnames = select * from dept_info where deptName in param.department_names and username = user context by deptName limit -1
+            deptnames = exec deptName from deptnames where isDeptAdmin = true
+            // 取出部门下所有的用户
+            user_list = exec distinct(username) from dept_info where deptName in deptnames
+            for (i in user_list) {// i = user_list[1]
+                tmp = facplf_get_my_dept_info(i)
+                res.append!(tmp)
+            }
+        }
+    }else{
+        throw toStdJson({ code: 'S001'})
+    }
+    ret = dict(STRING,ANY)
+    ret["items"] = res
+    ret["total"] = size(res)
+    return ret
+}
+
+
+// 获取部门审批选项
+def facplf_get_review_list() {
+    user = getCurrentSessionAndUser()[1]
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+
+    //找到当前用户所在部门
+    deptName = exec deptName from dept_info where username = user and deptName != "facplf$public" context by deptName limit -1
+    if (deptName.count() == 0) {throw toStdJson({ code: 'S021'})}
+
+    res = dict(STRING, ANY)
+    departments = []
+    //找到dept_reviewers
+    for (dept in deptName) {
+        review = exec * from dept_info where deptName = dept context by deptName,username limit -1
+        reviewers = exec username from review where isDeptReviewer = true
+        department = dict(STRING, ANY)
+        department["department"] = dept
+        department["reviewers"] = reviewers
+        departments.append!(department)
+    }
+
+    res["departments"] = departments
+    return res
+}
+
+
+// 获取系统审批选项
+def facplf_get_pub_review() {
+    res = dict(STRING, ANY)
+    users = exec * from loadTable("dfs://mgmt_user_info", "user_info") context by username limit -1
+    reviewers = exec username from users where isReviewer = true and isDeleted = false
+    res["reviewers"] = reviewers
+    return res
+}
+
+
+// 数据导入员的赋权
+def facplf_check_new_tb_access() {
+    user = getCurrentSessionAndUser()[1]
+    tables = getClusterDFSTables()
+    ret = table("dfs://" + tables.split("/")[2] as "database", tables.split("/")[3] as "table")
+    
+    my_own_db = select * from ret where database.like('%_'+user+"_%")
+    if (count(my_own_db)==0) {return NULL}
+    my_own_db = select *, 6 as starting, each(split, database, "_")[0][0] as deptName from my_own_db
+    my_own_db = exec database, table, each(substr, deptName, starting) as deptName from my_own_db
+    
+    // 部门权限
+    // 先找到所有我具有数据导入权限的部门
+    my_depts = exec * from loadTable("dfs://mgmt_dept_info", "dept_info") where username = user context by deptName, username limit -1
+    my_data_depts = exec deptName from my_depts where isDeptImporter = true;
+
+
+    // 系统权限
+    my_system_auth = exec * from loadTable("dfs://mgmt_user_info", "user_info") where username = user context by username limit -1
+
+    if (my_system_auth.isImporter == true) {
+        my_data_depts.append!('public')
+    }
+
+    my_own_db = select * from my_own_db where deptName in my_data_depts
+
+    dept_list = exec distinct(deptName) from my_own_db;
+
+    access_info = loadTable("dfs://mgmt_user_access", "user_access")
+    // dept = 'public'
+    for (dept in dept_list) {
+        dept_db = select * from my_own_db where deptName = dept;
+        if (dept == 'public') {
+            tbs = dept_db.database+"/"+dept_db.table
+            try{
+                grant('platform_access', TABLE_READ, tbs)
+            }catch(ex) {}
+        } else {
+            // 检查表格是否已存在（已被赋权）
+            current_dept_tb = exec * from loadTable("dfs://mgmt_user_access", "user_access") where deptName = dept;
+            // exist_dbs = select database, table from dept_db d inner join current_dept_tb c on d.database = c.dbName and d.table = c.tableName 
+            non_exist_tbs = select database, table from dept_db d left join current_dept_tb c on d.database = c.dbName and d.table = c.tableName where c.deptName is null;
+            
+            // 第一次detect到的表格
+            for (tb in non_exist_tbs) {
+                tbname = tb.database + "/"+tb.table
+                // 给自己赋权，加入access_tables
+                grant(user, TABLE_READ, tbname)
+                access_info.tableInsert(table(user as username, dept as deptName, tb.database as dbName, tb.table as tableName, false as isDeleted))
+            }
+            
+            // 找出部门admins并且赋权DB_MANAGE
+            dbs = exec distinct(database) from my_own_db where deptName = dept;
+            dept_users = select * from loadTable("dfs://mgmt_dept_info", "dept_info") where deptName = dept context by username limit -1
+            dept_admins = exec username from dept_users where isDeptAdmin == true;
+            
+            for (deptAdmin in dept_admins) {
+                grant(deptAdmin, DB_MANAGE, dbs)
+            }
+        }
+    }
+}
+
+
+// 获取用户可访问库表数据
+def facplf_get_all_read_tables(param) {
+    facplf_check_new_tb_access()
+    user = getCurrentSessionAndUser()[1]
+    tables = getClusterDFSTables()
+    getUserAccess()
+    ret = table("dfs://" + tables.split("/")[2] as "database", tables.split("/")[3] as "table")
+    delete from ret where database in facplf_get_all_backend_db();
+
+    if (isVoid(param.department_names)) {
+        return ret
+    } else {
+        // 验证是否在用户下
+        dept_list = exec distinct(deptName) from loadTable("dfs://mgmt_dept_info", "dept_info") where username = user
+        if (false in (param.department_names in dept_list)) {
+            throw toStdJson({ code: 'S001'})
+        }
+        access_tbs = select * from loadTable("dfs://mgmt_user_access","user_access") where username=user and deptName in param.department_names
+        access_tbs = select * from access_tbs context by dbName, tableName limit -1
+        access_tbs = select dbName as database, tableName as table from access_tbs where isDeleted = false;
+        return access_tbs
+    }
+}
+
+
+// 获取表 schema 信息
+def facplf_get_table_schema(param) {
+    table_schema = schema(loadTable(param.database, param.table)).colDefs
+    ret = select name, typeString as type_string, comment from table_schema
+    return ret
+}
+
+
+// 保存预设配置
+def facplf_save_preset(param) {
+    preset_tb = loadTable("dfs://preset_param_info", "param_info")
+    user = getCurrentSessionAndUser()[1]
+
+    tb = table(
+        user as username, 
+        string(param.name) as presetName, 
+        string(param.preset_type) as presetType, 
+        string(param.value) as preset, 
+        now() as lastModified, 
+        false as isDeleted)
+    preset_tb.append!(tb)
+}
+
+
+// 获取预设配置列表
+def facplf_get_preset_list(param) {
+    preset_tb = loadTable("dfs://preset_param_info", "param_info")
+    user = getCurrentSessionAndUser()[1]
+
+    // 重名覆盖
+    user_tb = select presetType as preset_type, presetName as name, preset as value, isDeleted from preset_tb where username = user and presetType = param.preset_type context by presetName limit -1
+    user_tb = select preset_type, name, value from user_tb where isDeleted != true
+    return user_tb
+}
+
+
+// 删除预设配置
+def facplf_delete_preset(param) {
+    preset_tb = loadTable("dfs://preset_param_info", "param_info")
+    user = getCurrentSessionAndUser()[1]
+
+    tb = table(user as username, param.name as presetName, param.preset_type as presetType, string(NULL) as preset, now() as lastModified, true as isDeleted)
+    preset_tb.append!(tb)
+}
+
+
+// 获得当前用户权限
+def facplf_get_user_access(user) {
+    user_info = loadTable("dfs://mgmt_user_info", "user_info")
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+
+    res = dict(STRING, ANY)
+
+    //系统权限
+    user_tb = select * from user_info where username = user context by username limit -1
+    user_tb = select * from user_tb where isDeleted = false
+
+    res["isImporter"] = user_tb["isImporter"][0]
+    res["isReviewer"] = user_tb["isReviewer"][0]
+
+    //部门权限
+    dept_tb = select * from dept_info where username = user context by deptName limit -1
+    res["isDeptAdmin"] = any(exec isDeptAdmin from dept_tb)
+    res["isDeptReviewer"] = any(exec isDeptReviewer from dept_tb)
+    res["isDeptFacEditor"] = any(exec isDeptFacEditor from dept_tb)
+    res["isDeptImporter"] = any(exec isDeptImporter from dept_tb)
+    res["isDeptStrategist"] = any(exec isDeptStrategist from dept_tb)
+
+    return res
+}
+
+
+// 获取因子函数信息
+def facplf_get_factors_funcs(param) {
+    user = getCurrentSessionAndUser()[1]
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    dept_info = loadTable("dfs://mgmt_dept_info", "dept_info")
+    
+    if ((param.include_private == false) && (param.include_public == false)) {
+        return NULL
+    }
+    
+    res = table(1:0, `fid`factorName`funcs`type, [STRING, STRING, STRING, STRING])
+
+    //私有因子
+    if (param.include_private) {
+        draft_tb = select fid, factorName, funcs, isDeleted from draft_info where username = user context by fid limit -1
+        draft_tb = select fid, factorName, funcs, 'private' as type from draft_tb where isDeleted = false
+        res.append!(draft_tb)
+    }
+
+    //公开因子
+    if (param.include_public) {
+        // 权限：admin, system reviewer
+        check_right = facplf_get_user_access(user)
+        if ((user == "admin") || (check_right.isReviewer == true)) {
+            dept = exec distinct deptName from dept_info
+        } else {
+            dept = exec distinct deptName from dept_info where username = user 
+        }
+        dept.append!("facplf$public")
+
+        public_tb = select fid, factorName, funcs, isDeleted from public_info where deptName in dept context by fid, deptName limit -1
+        public_tb = select fid, factorName, funcs, 'public' as type from public_tb where isDeleted = false
+        res.append!(public_tb)
+    }
+
+    result = select fid as `factor_id, factorName as `factor_name, funcs.split(",") as funcs, type from res context by factorName limit 1
+
+    return result
+}
+
+
+// 获取用户所有可用模板
+def facplf_get_user_all_templates() {
+    user = getCurrentSessionAndUser()[1]
+
+    // private
+    private_tb = loadTable("dfs://temp_draft_info", "draft_info")
+    private_templates = select tempId as template_id, tempName as name, factorCat as factor_properties, tags as tags, comment as comment, createTime as create_time, lastModified as update_time, username as creator from private_tb where username = user context by tempId having sum(case when isDeleted = true then 1 else 0 end) = 0 limit -1
+    // public
+    public_tb = loadTable("dfs://temp_public_info", "public_info")
+    dept_info_tb = loadTable("dfs://mgmt_dept_info", "dept_info")
+    dept = exec distinct deptName from dept_info_tb where username = user
+    // 系统+部门
+    tb_f = select * from public_tb where deptName = 'facplf$public' or deptName in dept order by tempId, deptName, reviewTime desc
+    // 对每个fid,取更高级或同级别更新的一条
+    tb_f = select * from tb_f context by tempId, deptName limit 1
+    tb_f = select tempId as template_id, tempName as name, factorCat as factor_properties, comment as comment, username as creator, iif(deptName == 'facplf$public', 'system', 'department') as public_level, reviewTime as publish_time, iif(isNull(username), false, true) as is_custom from tb_f where isDeleted != true order by template_id, public_level desc, publish_time desc
+    tb_f = select * from tb_f context by template_id limit 1
+    
+    public_templates = select * from tb_f order by publish_time desc
+
+    res_dict = dict(STRING, ANY)
+    res_dict["private"] = private_templates
+    res_dict["public"] = public_templates
+
+    return res_dict
+}
+
+
+//获取tag列表
+def facplf_get_tag_list(param) {
+    tag_tb = loadTable("dfs://preset_tag_info", "tag_info")
+    res = select distinct tagName from tag_tb where type = param.type
+    res = exec * from res where tagName != NULL
+    return res
+}
+
+// 获取因子标签选项
+def facplf_get_factor_tag_list() {
+    tags = exec tagName from loadTable("dfs://preset_tag_info", "tag_info")
+    return tags
+}
+
+// 保存标签
+def facplf_save_tag(tags, type) {
+    user = getCurrentSessionAndUser()[1]
+    n_tags = count(tags)
+    if (n_tags > 0) {
+        tag_tb = table(tags as tagName, take(type, n_tags) as type, take(user, n_tags) as username)
+        loadTable("dfs://preset_tag_info", "tag_info").append!(tag_tb)
+    }
+}
+
+// 解析任务状态
+def facplf_parse_job_status(status_tb) {
+    //timestamp
+    try{
+        status = iif(isValid(status_tb.errorMsg)[0], -1, iif(status_tb.endTime[0] == NULL, 0, 1))
+    }catch(ex) {
+        status = iif(isValid(status_tb.errMsg)[0], -1, iif(status_tb.endTime[0] == NULL, 0, 1))
+    }
+    return status
+}
+
+// 获取任务状态
+def facplf_get_job_status(job_id, type, node) {
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    user = getCurrentSessionAndUser()[1]
+
+    // 存在检查
+    status_tb = select * from status_info where jobId = job_id context by jobId limit -1
+
+    if(count(status_tb) != 0) {
+        //存在
+        tmp_status = facplf_parse_job_status(status_tb)
+        if (tmp_status != 0) {
+            // 已结束则返回
+            return tmp_status
+        } else {
+            // 未结束则检查最新任务状态
+            try{
+                new_status_tb = rpc(node, getJobStatusById, job_id)
+            }catch(ex) {
+                new_status_tb = table(job_id as jobId, now() as startTime, now() as endTime, ex[1] as errMsg)
+            }
+            new_status = facplf_parse_job_status(new_status_tb)
+            if (new_status != 0) {
+                // 已结束则更新表
+                update status_tb set endTime = new_status_tb["endTime"], errorMsg = new_status_tb["errMsg"]
+                status_info.append!(status_tb)
+            }
+            return new_status
+        }
+    } else {
+        //不存在
+        try{
+            get_status_tb = rpc(node, getJobStatusById, job_id)
+        }catch(ex) {
+            get_status_tb = table(job_id as jobId, now() as startTime, timestamp(NULL) as endTime, string(NULL) as errMsg)
+        }
+        new_status = facplf_parse_job_status(get_status_tb)
+        new_status_tb = table(
+            int(type) as jobType,
+            node as node,
+            user as userID,
+            job_id as jobId,
+            string(NULL) as rootJobId,
+            string(NULL) as jobDesc,
+            int(NULL) as priority,
+            int(NULL) as parallelism,
+            string(NULL) as clientIp,
+            int(NULL) as clientPort,
+            get_status_tb["startTime"][0] as receivedTime,
+            get_status_tb["startTime"][0] as startTime,
+            get_status_tb["endTime"][0] as endTime,
+            get_status_tb["errMsg"][0] as errorMsg
+        )
+        status_info.append!(new_status_tb)
+        return new_status
+    }
+}
+
+// 任务依赖判断
+def facplf_check_job_done(node, jobId) {
+    record_time = 0
+    do{
+        try{
+            status_tb = rpc(node, getJobStatusById, jobId)
+            status = facplf_parse_job_status(status_tb)
+        }catch(ex){
+            status = 0
+        }
+        if(status in [-1,1]) {
+            return status
+        } else {
+            sleep(1000)
+            record_time += 1
+        }
+    } while(record_time <= 3600)
+
+    //1小时后自动cancel
+    if(status == 0) {
+        rpc(node, cancelJob, jobId)
+        return 0
+    } else{
+        return status
+    } 
+}
+
+
+
+// 获得多个任务状态
+defg facplf_get_multi_tests_status(jobStatus) {
+    // 判断顺序重要
+    if (0 in jobStatus) {
+        return 0
+    }
+    
+    if (all(jobStatus==-1)) {
+        return -1
+    }
+    
+    if (-1 in jobStatus) {
+        return -2
+    } 
+    
+    if (all(jobStatus==1)) {
+        return 1
+    }
+}
+
+
+// 更新任务状态表
+def facplf_update_job_status() {
+    user = getCurrentSessionAndUser()[1]
+    status_info = loadTable("dfs://job_status_info", "status_info")
+
+    if(user == "admin"){
+        status_tb = select * from status_info context by jobId limit -1
+    } else {
+        status_tb = select * from status_info where userID = user context by jobId limit -1
+    }
+
+    uncompeleted_job = select * from status_tb where jobId is not null and endTime is null
+
+    n = count(uncompeleted_job)
+    if(n==0) {return NULL}
+
+    job_tb = table(1:0, ["jobId", "startTime", "endTime", "errMsg"], [STRING, TIMESTAMP, TIMESTAMP, STRING])
+    for(i in 0..(n-1)){//job = uncompeleted_job["jobId"][0]
+        job_tb.append!(rpc(uncompeleted_job["node"][i], getJobStatusById, uncompeleted_job["jobId"][i]))
+    }
+
+    update uncompeleted_job set startTime = job_tb["startTime"], endTime = job_tb["endTime"], errorMsg = job_tb["errMsg"]
+    compeleted_job = select * from uncompeleted_job where endTime is not null
+    status_info.append!(compeleted_job)
+}
+
+// 获取脚本代码的参数
+def facplf_get_script_syntax(code, tempName) {
+    try{runScript(code)}catch(ex) {throw toStdJson(dict(`code`variables, ["S047",ex[0]+": "+ex[1]]))}
+    //获取函数参数
+    syntax = (exec syntax from defs() where name = tempName)[0]
+    a = strpos(syntax, "(")+1
+    b = strpos(syntax, ")")
+    syntax_list = substr(syntax, a, b-a).split(",")
+    //返回一个array
+    return syntax_list
+}
+
+// 转换控件类型的数据格式
+def facplf_extract_control_type(params) {
+
+    if (params.type == 'prev_task_result') {return 'prev_task_result'}
+    if (params.type == 'prev_test_result') {return 'prev_test_result'}
+    if (params.type == 'factor') {return 'facplf_factor_name'}
+
+    if(isVoid(params.value)) {return NULL}
+
+    if (params.type == 'db_tb_col_select') {
+        return parseExpr(params.value.column)
+    } else if (params.type == 'db_tb_select') {
+        return loadTable(params.value.database, params.value.table)
+    } else if (params.type == 'string') {
+        return string(params.value)
+    } else if (params.type == 'date') {
+        return date(params.value)
+    } else if (params.type == 'time') {
+        return timestamp(params.value)
+    } else if (params.type == 'datetime') {
+        return datetime(params.value)
+    } else if (params.type == 'float') {
+        return float(params.value)
+    } else if (params.type == 'double') {
+        return double(params.value)
+    } else if (params.type == 'short') {
+        return short(params.value)
+    } else if (params.type == 'int') {
+        return int(params.value)
+    } else if (params.type == 'long') {
+        return long(params.value)
+    } else if (params.type == 'bool') {
+        return bool(params.value)
+    } else {
+        return NULL
+    }
+}
+
+//存储状态表
+def facplf_save_job_status(jobList, jobType) {
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    schema = status_info.schema().colDefs
+    job_tb = table(1:0, schema.name, schema.typeString)
+    for (jobs in jobList) {
+        status_tb = select jobType as `jobType, * from getJobStatus(jobs)
+        job_tb.append!(status_tb)
+    }
+    status_info.append!(job_tb)
+}
+
+def facplf_add_functionview(name){
+    try{addFunctionView(funcByName(name))}catch(ex){print(ex)};go
+    try{undef(name, DEF)}catch(ex){print(ex)}
+}
+
+// 修改模板的函数名
+def facplf_edit_code(oldCode, oldName, newName){
+    rep = 'def ' + oldName + '('
+    def_pos = strpos(oldCode, rep)
+    ct_code = substr(oldCode, def_pos, strlen(oldCode))
+    end_pos = strpos(ct_code, "(") + def_pos
+    func_name = substr(oldCode, def_pos+4, end_pos-4-def_pos).strReplace(" ",     "")
+    part1 = substr(oldCode, 0, def_pos+4)
+    part2 = substr(oldCode, end_pos, strlen(oldCode))
+    newCode = part1 + newName + part2
+    return newCode
+}
+
+// 重构模板代码相关接口
+/*
+1.检查代码是否为空
+2.加载所有module
+3.检查主函数名和模板名一致
+4.试运行代码
+5.获取主函数参数
+6.清除缓存(函数定义)
+*/
+def facplf_code_check_run_clear_cache(code, modules, templateName) {
+    // 1.检查代码是否为空
+    if (code == NULL) {
+        throw toStdJson({code:"S028"})
+    }
+    // 2.检查主函数名和模板名一致
+    mainfunc = 'def ' + templateName + '('
+    def_pos = strpos(code, mainfunc)
+    if (def_pos == -1) {
+        throw toStdJson({code: "S027"})//message: "保存失败，函数名需与模板名称保一致"
+    }
+    // 3.加载所有module
+    try {
+        each(loadModuleFromScript, modules.moduleName, modules.code, true)
+    } catch(ex) {
+        throw toStdJson(dict(`code`variables,["S047", ex[0]+": "+ex[1]]))
+    }
+    // 4.试运行代码
+    try{
+        runScript(code)
+    }catch(ex){
+        throw toStdJson(dict(`code`variables, ["S047",ex[0]+": "+ex[1]]))
+    }
+    // 5.获取主函数参数
+    syntax = (exec syntax from defs() where name = templateName)[0]
+    syntax = substr(syntax, 1, strlen(syntax) - 2)
+    // 6.清除缓存(函数定义)
+    undef all, DEF
+    // 7.返回参数
+    return syntax
+}

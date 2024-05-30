@@ -1,0 +1,922 @@
+////////////////
+///工作流-任务///
+///////////////
+//查询已有任务列表
+def facplf_get_workflow_task_list(){
+    user = getCurrentSessionAndUser()[1]
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+
+    wfj = select * from job_list where username = user and type = 0 context by id order by updateTime desc limit -1
+    wfj = select * from wfj where isDeleted = false
+
+    res = dict(STRING, ANY)
+    items = []
+    for(j in wfj){
+    item = dict(STRING, ANY)
+    item["job_id"] = j.id
+    item["job_name"] = j.jobName
+    item["job_type"] = j.jobType
+    item["comment"] = j.comment
+    item["update_time"] = j.updateTime
+    item["params"] = string(j.parameter)
+    items.append!(item)
+    }
+    res["items"] = items
+    res["total"] = items.count()
+
+    return res
+}
+
+//新建任务
+def facplf_create_workflow_task(param){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    user = getCurrentSessionAndUser()[1]
+
+    id = rand(uuid(),1)
+    comment = iif(isVoid(param.comment), string(NULL), param.comment)
+    job_list.tableInsert(
+        table(
+            id as `id,
+            param.job_name as `jobName,
+            user as `username,
+            now() as `updateTime,
+            blob(toStdJson(param.params))as `parameter,
+            0 as `type,
+            param.job_type as `jobType,
+            comment as `comment,
+            false as `isDeleted)
+        )
+    res = dict(STRING, ANY)
+    res["job_id"] = id
+    return res
+}
+
+
+//查询可写入库表列表
+def facplf_get_editable_tb_list(){
+    user = getCurrentSessionAndUser()[1]
+    tb_list = []
+    
+    //可写入的库表分为四种(有可能重复)：初始化的三个因子值落库表+自己为dbowner+自己的table_insert+自己的db_insert
+    
+    //初始化的三个因子值落库表
+    tb_list.append!(dict(`database`table, ["dfs://public_HIGH", "high"]))
+    tb_list.append!(dict(`database`table, ["dfs://public_MEDIUM", "medium"]))
+    tb_list.append!(dict(`database`table, ["dfs://public_LOW", "low"]))
+    
+    //当前用户所有db ownwer权限的库
+    alldb = getClusterDFSDatabases()
+    //后端库表
+    hidDb = facplf_get_all_backend_db()
+    //隐藏后端库表
+    db = alldb[![alldb in hidDb][0]]
+    
+    //用户所有可写入库
+    dbinsert = []
+    gdb = exec DB_INSERT_allowed from rpc(getControllerAlias(), getUserAccess)
+    if(count(gdb) != 0){
+        dt = gdb[0].split(",")
+        for(t in dt){dbinsert.append!(t)}
+    }
+    
+    //用户所有可写入表
+    tbinsert = []
+    gtb = exec TABLE_INSERT_allowed from rpc(getControllerAlias(), getUserAccess)
+    if(count(gtb) != 0){
+        tb = gtb[0].split(",")
+        for(t in tb){tbinsert.append!(t)}
+    }
+    
+    //如果无库表可写入则返回[]
+    if ((db.count()==0)and(tbinsert.count()==0)and(dbinsert.count()==0)){return tb_list}
+    
+    //db写入
+    for(i in db){
+        if(!(i in ["dfs://public_HIGH", "dfs://public_MEDIUM", "dfs://public_LOW"])){
+            for(t in getDFSTablesByDatabase(i)){
+                table = iif(t.count()!=0, last(t.split("/")), string(NULL))
+                tb_list.append!(dict(`database`table, [i, table]))
+            }
+        } 
+    }
+    
+    //dbinsert写入（重复则跳过）
+    for(i in dbinsert){//i=dbinsert[0]
+        if (!(i in db)){
+            for(t in getDFSTablesByDatabase(i)){
+                table = iif(t.count()!=0, last(t.split("/")), string(NULL))
+                tb_list.append!(dict(`database`table, [i, table]))
+            }
+        }
+    }
+    
+    //tbinsert写入（重复则跳过）
+    for(i in tbinsert){//i=tbinsert[0]
+        dbname = "dfs://" + i.split("/")[2]
+        tbname = i.split("/")[3]
+        if (!(dbname in db)){
+            tb_list.append!(dict(`database`table, [dbname, tbname]))
+        }
+    }
+    
+    for(i in tbinsert){//i=tbinsert[0]
+        dbname = "dfs://" + i.split("/")[2]
+        tbname = i.split("/")[3]
+        if (!(dbname in db)){
+            tb_list.append!(dict(`database`table, [dbname, tbname]))
+        }
+    }
+    return tb_list
+}
+
+
+//查询任务详情
+def facplf_get_workflow_task_detail(param){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+
+    wfj = select * from job_list where id = uuid(param.job_id) and type = 0 context by id limit -1
+    wfj = select * from wfj where isDeleted = false
+    if (wfj.count() == 0) {return NULL}
+
+    res = dict(STRING, ANY)
+    res["job_id"] = wfj.id[0]
+    res["job_name"] = wfj.jobName[0]
+    res["job_type"] = wfj.jobType[0]
+    res["comment"] = wfj.comment[0]
+    res["update_time"] = wfj.updateTime[0]
+    res["params"] = string(wfj.parameter[0])
+
+    return res
+}
+
+
+//编辑任务
+def facplf_edit_workflow_task(param){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+
+    wfj = select * from job_list where id = uuid(param.job_id) and type = 0 context by id limit -1
+    wfj = select * from wfj where isDeleted = false
+    update wfj set jobName = param.job_name, updateTime = now(), parameter = blob(toStdJson(param.params)), comment = param.comment, jobType = param.job_type
+    job_list.append!(wfj)
+}
+
+
+//删除任务
+def facplf_delete_workflow_task(param){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+
+    wfj = select * from job_list where id = uuid(param.job_id) and type = 0 context by id limit -1
+    wfj = select * from wfj where isDeleted = false
+    update wfj set isDeleted = true, jobName = string(NULL), parameter = blob(string(NULL)), updateTime = now()
+    job_list.append!(wfj)
+}
+
+
+
+//////////////////
+///工作流-工作流///
+/////////////////
+
+//查询工作流列表
+def facplf_get_workflow_list(){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    run_info = loadTable("dfs://workflow_run_info", "run_info")
+    user = getCurrentSessionAndUser()[1]
+
+    wf = select * from job_list where username = user and type = 1 context by id order by updateTime desc limit -1
+    wf = select * from wf where isDeleted = false
+
+    res = dict(STRING, ANY)
+    items = []
+    for(i in wf){
+        item = dict(STRING, ANY)
+        item["workflow_id"] = i.id
+        item["workflow_name"] = i.jobName
+
+        //运行记录
+        rrc = select * from run_info where wid = i.id context by workflowJobId limit -1
+        record = exec workflowJobId from rrc where isDeleted = false
+
+        item["run_record_count"] = count(record)
+        item["update_time"] = i.updateTime
+        item["comment"] = i.comment
+        items.append!(item)
+    }
+
+    res["items"] = items
+    res["total"] = items.count()
+
+    return res
+}
+
+// 新建工作流
+def facplf_create_workflow(param) {
+    user = getCurrentSessionAndUser()[1]
+    workflow_job_list = loadTable("dfs://workflow_job_list", "job_list")
+
+    new_wid = rand(uuid(), 1)
+    tb = table(new_wid as id, param.workflow_name as jobName, user as username, now() as updateTime, string(NULL) as parameter, 1 as type, int(NULL) as jobType, string(param.comment) as comment, false as isDeleted)
+
+    workflow_job_list.append!(tb)
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict["workflow_id"] = string(new_wid)[0]
+    return tmp_dict
+}
+
+// 修改工作流元信息
+def facplf_edit_workflow(param) {
+    user = getCurrentSessionAndUser()[1]
+    workflow_job_list = loadTable("dfs://workflow_job_list", "job_list")
+
+    // 确定工作流存在
+    existing_wid = select * from workflow_job_list where username = user order by id, updateTime desc
+    existing_wid = select * from existing_wid context by id limit 1
+    existing_wid = exec id from existing_wid where isDeleted != true
+
+    if (!(uuid(param.workflow_id) in existing_wid)) {
+        throw toStdJson({code:"S037"})
+    }
+
+    prev_tb = select * from workflow_job_list where username = user and string(id) = param.workflow_id order by updateTime desc
+    prev_tb = select * from prev_tb limit 1
+    tb = table(uuid(param.workflow_id) as id, param.workflow_name as jobName, user as username, now() as updateTime, string(prev_tb.parameter) as parameter, int(prev_tb.type) as type, int(NULL) as jobType, string(param.comment) as comment, false as isDeleted)
+
+    workflow_job_list.append!(tb)
+}
+
+
+// 删除工作流
+def facplf_delete_workflow(param) {
+    user = getCurrentSessionAndUser()[1]
+    workflow_job_list = loadTable("dfs://workflow_job_list", "job_list")
+    scheduled_job_list = loadTable("dfs://workflow_schedule_jobs", "schedule_jobs")
+
+    // 确定工作流存在
+    existing_wid = select * from workflow_job_list where username = user order by id, updateTime desc
+    existing_wid = select * from existing_wid context by id limit 1
+    existing_wid = exec id from existing_wid where isDeleted != true
+
+    if (!(uuid(param.workflow_id) in existing_wid)) {
+        throw toStdJson({code:"S037"})
+    }
+
+    // 删除
+    prev_type = exec type from workflow_job_list where username = user and string(id) = param.workflow_id context by id limit -1
+    tb = table(uuid(param.workflow_id) as id, string(NULL) as jobName, user as username, now() as updateTime, string(NULL) as parameter, prev_type as type, int(NULL) as jobType, string(NULL) as comment, true as isDeleted)
+
+    workflow_job_list.append!(tb)
+
+    // 删除定时任务
+    existing_schedule = select * from scheduled_job_list where username = user and string(wid) = param.workflow_id order by updateTime desc limit 1
+    existing_schedule = select * from existing_schedule where isDeleted != true
+    if (size(existing_schedule) != 0) {
+        prev_jobId = exec jobId from existing_schedule
+        try {
+            deleteScheduledJob(prev_jobId)
+        } catch(ex) {}
+        tb_schedule = table(uuid(param.workflow_id) as wid, string(NULL) as jobId, user as username, date(NULL) as startDate, date(NULL) as endDate, string(NULL) as frequency, string(NULL) as scheduledTime, string(NULL) as days, now() as updateTime, string(NULL) as funcCode, true as isDeleted)
+        scheduled_job_list.append!(tb_schedule)
+    }
+
+}
+
+
+// 获得所有节点的子级节点
+def facplf_parse_graph(edges, nodes){
+    graph = dict(STRING, ANY)
+    try{
+        edges_tmp = edges[! each(isVoid, edges)]
+    }catch(ex){
+        edges_tmp = []
+    }
+    for (edge in edges_tmp) {
+        graph.dictUpdate!(append!, edge.source, edge.target, x->array(x.type(), 0, 512).append!(x))
+    }
+    return graph
+}
+
+//运行
+def facplf_parse_orders(graph) {
+    visited = dict(STRING, ANY)
+    orders = array(STRING)
+    stack = array(STRING)
+    for (k in graph.keys()){
+        if (!(k in graph.values())){
+            stack.append!(k)
+            break
+        }
+    }
+    
+    do{
+        current = stack[size(stack)-1]
+        stack.removeTail!(1)
+        if (!(current in visited.keys())) {
+            visited[current] = true
+            orders.append!(current)
+            for (neighbor in graph[current]) {
+                if (!(neighbor in visited.keys())) {
+                    stack.append!(neighbor)
+                }
+            }
+        }
+    }while(count(stack)!=0)
+    return orders
+}
+
+def facplf_workflow_factor_helper(code, is_to_db, to_db, fac) {
+    //code = last_code
+    user = getCurrentSessionAndUser()[1]
+    //加载所有因子模块
+    type = 0
+    my_fac = facplf_find_available_factors(type)
+    each(loadModuleFromScript, my_fac.factorName, my_fac.factorCode, true)
+
+    try{
+        result = code.eval()
+    }catch(ex){
+        errorMsg = fac + " 因子计算失败: " + ex[0] + "->" + ex[1]
+        return errorMsg
+    }
+    print(fac + " 因子计算成功")
+
+    if (is_to_db == true) {
+        write_db = loadTable(to_db.database, to_db.table)
+        // 增加判断: 1.如果是因子平台系统表, 则增加username列 2.如果不是则不用增加
+        if (to_db.database in ('dfs://public_HIGH', 'dfs://public_LOW', 'dfs://public_MEDIUM')) {
+            res = select user as username, * from result
+        }else {
+            res = result
+        }
+        
+        try{
+            write_db.append!(res)
+        }catch(ex){
+            errorMsg = fac + " 入库失败: " + ex[0] + "->" + ex[1]
+            return errorMsg
+        }
+        msg = fac + " 计算成功并入库"
+        return msg
+    } else{
+        msg = fac + " 计算成功"
+        return msg
+    }
+}
+
+// 工作流因子任务
+def facplf_workflow_factor(params) {
+    draft_info = loadTable("dfs://factor_draft_info", "draft_info")
+    public_info = loadTable("dfs://factor_public_info", "public_info")
+
+    // 获取所有因子
+    fac_list = array(STRING)
+    for (fac in params.factors){//fac = params.factors[1]
+        factor_id = uuid(fac.factor_id)
+        facName = (exec factorName from draft_info where fid = factor_id context by fid limit -1)[0]
+        if (isNull(facName)) {
+            // 
+            pre = select fid, factorName, isDeleted from public_info where fid = factor_id context by fid, deptName limit -1
+            facName = (exec factorName from pre where isDeleted = false)[0]
+        }
+        for (func in fac.funcs){// func = fac.funcs[0]
+            fac_list.append!(facName+"::"+func)
+        }
+    }
+
+    // 提取模板
+    temp_params = facplf_extract_template_codes(params.templates)
+    
+    // 取出所有的模板代码
+    template_codes = array(STRING)
+    for (temp in temp_params.values()) {
+        template_codes.append!(temp.template_code)
+    }
+
+    jobList = array(STRING)
+    for(fac in fac_list) {//fac = fac_list[0]
+        run_codes = array(ANY)
+        //参数代入
+        for(index in temp_params.keys()) {//index = temp_params.keys()[0]
+            temp_param = temp_params[index]
+            param_list = facplf_get_script_syntax(temp_param.template_code, temp_param.tempname)
+            pa = array(ANY)
+            for (i in param_list) {//i = param_list[0]
+                if (typestr(temp_param[i]) == "STRING") {
+                    if(temp_param[i] == "prev_task_result"){
+                        pa.append!(run_codes[index-1])
+                    } else if(temp_param[i] == "facplf_factor_name") {
+                        pa.append!(fac)
+                    } else {
+                        pa.append!(temp_param[i])
+                    }
+                }
+                else {
+                    pa.append!(temp_param[i])
+                }
+            }
+            runScript(temp_param.template_code)
+            code = makeUnifiedCall(funcByName(temp_param.tempname), pa)
+            run_codes.append!(code)
+        }
+        last_code = last(run_codes)
+        
+        jobId = fac.regexReplace("::", "_") + "_" + string(now()).strReplace(":", "").strReplace(".", "")
+        jobId = submitJob(jobId, "", facplf_workflow_factor_helper, last_code, params.is_to_db, params.to_db, fac)
+        jobList.append!(jobId)
+    } 
+
+    jobIds = jobList.copy()
+        do{
+            job = jobIds[0]
+            jobIds = jobIds.drop(1);
+            status_tb = getJobStatus(job)
+            if (count(status_tb["endTime"]) != 0){
+                print(getJobReturn(job))
+            } else {
+                //任务未结束
+                jobIds.append!(job)
+            }
+        }while(count(jobIds) > 0)
+}
+facplf_add_functionview("facplf_workflow_factor");go
+
+// 工作流数据导入任务
+def facplf_workflow_data(params) {
+    module_info = loadTable("dfs://data_module_info", "module_info")
+    template_info = loadTable("dfs://data_template_info", "template_info")
+
+    //加载数据导入函数库
+    all_templates = select * from module_info context by dlid limit -1;
+    all_templates = select moduleName, code from all_templates where isDeleted = false;
+
+    for(lib in all_templates){
+        try{loadModuleFromScript(lib.moduleName, lib.code, true)}catch(ex){
+            print("数据导入函数库"+lib.moduleName+"加载失败")
+        }
+    }
+
+    //加载数据导入模板
+    param = params.templates[0]
+    temp_id = uuid(param.template_id)
+    temp_tb = select code,templateName,parameter from template_info where dtid = temp_id context by dtid limit -1
+
+    template_code = temp_tb.code[0]
+    template_name = temp_tb.templateName[0]
+    try{
+        loadModuleFromScript(template_name, template_code, true)
+    }catch(ex){
+        print("数据导入模板"+template_name+"加载失败, 函数定义报错:" + ex[0] + "->" + ex[1])
+    }
+
+    //清洗参数
+    all_parameters = facplf_extract_data_template(param.template_params)
+    parameters = all_parameters.parameters
+    dbName = all_parameters.dbName
+    tbName = all_parameters.tbName
+
+    args = array(ANY)
+    if(count(temp_tb.parameter[0]) != 0){
+        for (i in temp_tb.parameter[0].split(',')) {
+            args.append!(parameters[i])
+        }
+    }
+    
+    unifiedCall(funcByName(template_name+"::"+template_name), args)
+}
+facplf_add_functionview("facplf_workflow_data");go
+
+// 工作流策略任务
+def facplf_workflow_strategy(params) {
+    print('策略任务模拟')
+}
+
+// 工作流运行任务设置
+    /*
+    nodes = graph_data.nodes
+    wid = workflow_info.id
+    comment = workflow_info.comment
+    */
+def facplf_workflow_run_helper(orders, nodes, wid, workflowJobId, comment) {
+    user = getCurrentSessionAndUser()[1]
+    nodeAlias = getNodeAlias()
+    run_info = loadTable("dfs://workflow_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info") 
+
+    for (node in orders) {//node = orders[0]
+        creatTime = now()
+        params = nodes[node]["data"]["params"]
+        jobId = nodes[node]["type"].strReplace("-","_") + string(creatTime).strReplace(":", "").strReplace(".", "")
+        taskName = nodes[node]["data"]["name"]
+        // 分任务类型
+        // 1. 因子计算
+        if (nodes[node]["data"]["type"] == 1) {
+            jobId = submitJob(jobId, taskName, facplf_workflow_factor, params)
+        }
+        // 2. 策略
+        if (nodes[node]["data"]["type"] == 2) {
+            jobId = submitJob(jobId, taskName, facplf_workflow_strategy, params)
+        }
+        // 3. 数据导入
+        if (nodes[node]["data"]["type"] == 3) {
+            jobId = submitJob(jobId, taskName, facplf_workflow_data, params)
+        }
+
+        // 加入工作流运行记录表
+        tmp = table(
+            wid as `wid, 
+            workflowJobId as `workflowJobId, 
+            jobId as `taskJobId,
+            taskName as `taskName,
+            user as `username, 
+            comment as `comment, 
+            nodes[node]["data"]["type"] as `type, 
+            creatTime as `startTime, 
+            nodeAlias as `clusterNode, 
+            blob(toStdJson(params)) as `parameter, 
+            false as `isDeleted
+            )
+        run_info.append!(tmp)
+        
+        //存状态表
+        jobtb = select 3 as jobType, * from getJobStatus(jobId)
+        status_info.append!(jobtb)
+
+        //任务完成情况
+        status = facplf_check_job_done(nodeAlias, jobId)
+        if (status == 0) {
+            throw (taskName + " is uncompleted over 10 minutes and is killed by system. All subsequent tasks have been stopped.")
+        } else if(status == -1){
+            throw (taskName + " failed. All subsequent tasks have been stopped.")
+        } else {
+            print(taskName + "completed")
+        }
+    }
+}
+
+// 立即运行
+def facplf_workflow_run(param) {
+    user = getCurrentSessionAndUser()[1]
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+
+    wid = uuid(param.workflow_id)
+    workflow_info = select * from job_list where username = user and id = wid and type = 1 context by id limit -1
+    workflow_info = select * from workflow_info where isDeleted = false
+    if (count(workflow_info)==0){throw toStdJson({"code": "S037"})}
+
+    workflowJobId = (user + "_" + regexReplace(string(workflow_info.id), "-", "_") + "_" + string(now()).strReplace(":", "").strReplace(".", ""))[0]
+
+    // 获得顺序
+    if(count(workflow_info.parameter[0])==0){throw toStdJson({"code": "S037"})}
+
+    graph_data = parseExpr(string(workflow_info.parameter[0])).eval()
+    graph = facplf_parse_graph(graph_data.edges, graph_data.nodes.keys())
+    orders = iif(count(graph_data.nodes.keys())>1, facplf_parse_orders(graph), graph_data.nodes.keys())
+    
+    submitJob(workflowJobId,"", facplf_workflow_run_helper, orders, graph_data.nodes, workflow_info.id, workflowJobId, workflow_info.comment)
+}
+
+/*
+nodes = graph_data.nodes
+wid = workflow_id
+comment = workflow_info.comment[0]
+*/
+def facplf_workflow_schedule_helper(orders, nodes, wid, workflowJobId, comment) {
+    try {
+        // nodes = graph_data.nodes
+    // wid = workflow_id
+    // comment = workflow_info.comment[0]
+    user = getCurrentSessionAndUser()[1]
+    nodeAlias = getNodeAlias()
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    run_info = loadTable("dfs://workflow_run_info", "run_info")
+    schema = run_info.schema().colDefs
+    res = table(1:0, schema.name, schema.typeString)
+
+    for (node in orders) {//node = orders[0]
+        creatTime = now()
+        nodeAlias = getNodeAlias()
+        jobId = nodes[node]["type"].strReplace("-","_") + string(creatTime).strReplace(":", "").strReplace(".", "")
+        params = nodes[node]["data"]["params"] 
+        taskName = nodes[node]["data"]["name"]
+        // 分任务类型
+        // 1. 因子计算
+        writeLog("FACPLF: Scheduled job " + jobId + " is going to submit")
+        if (nodes[node]["data"]["type"] == 1) {
+            jobId = submitJob(jobId, taskName, facplf_workflow_factor, params)
+        }
+        // 2. 策略
+        if (nodes[node]["data"]["type"] == 2) {
+            jobId = submitJob(jobId, taskName, facplf_workflow_strategy, params)
+        }
+        // 3. 数据导入
+        if (nodes[node]["data"]["type"] == 3) {
+            jobId = submitJob(jobId, taskName, facplf_workflow_data, params)
+        }
+        writeLog("FACPLF: Scheduled job " + jobId + " is submitted")
+
+        // 加入工作流运行记录表
+        tmp = table(
+            wid as wid, 
+            string(NULL) as workflowJobId, 
+            jobId as taskJobId, 
+            taskName as taskName,
+            user as username, 
+            comment as comment, 
+            nodes[node]["data"]["type"] as type, 
+            creatTime as startTime, 
+            nodeAlias as clusterNode, 
+            blob(toStdJson(params)) as parameter, 
+            false as isDeleted
+        )
+        res.append!(tmp)
+        writeLog("FACPLF: Scheduled job " + taskName + " is added into run info")
+
+        //加入状态表
+        jobtb = select 3 as jobType, * from getJobStatus(jobId)
+        status_info.append!(jobtb)
+        writeLog("FACPLF: Scheduled job " + taskName + " is added into status info")
+
+        //任务完成情况
+        status = facplf_check_job_done(nodeAlias, jobId)
+        if (status == 0) {
+            throw (taskName + " is uncompleted over 10 minutes and is killed by system. All subsequent tasks have been stopped.")
+        } else if(status == -1){
+            throw (taskName + " failed. All subsequent tasks have been stopped.")
+        } else {
+            print("Scheduled job " + taskName + " completed.")
+        }
+        writeLog("FACPLF: Scheduled job " + taskName + " completed.")
+    }
+    return res
+    }catch(ex){
+        throw ex
+    }
+}
+facplf_add_functionview("facplf_workflow_schedule_helper");go
+
+
+// on complete 回调函数
+def facplf_schedule_workflow_job_id(jobId, jobDesc, success, result){
+    run_info = loadTable("dfs://workflow_run_info", "run_info")
+    id = jobId
+    res = result
+    // writeLog("jobId:" + jobId)
+    // writeLog("jobDesc: " + jobDesc)
+    // writeLog("success: " + success)
+    // writeLog("result: " + result)
+    // 从getRecentJobs中找到id
+    schd_workflowJobId = (exec jobId from getRecentJobs() where jobId like (id + "%") context by jobId limit -1)[0]
+    update res set workflowJobId = schd_workflowJobId + "_" + string(now()).strReplace(":", "").strReplace(".", "")
+    run_info.append!(res)
+}
+facplf_add_functionview("facplf_schedule_workflow_job_id");go
+
+// 删除定时任务
+def facplf_delete_schedule_workflow(param) {
+    user = getCurrentSessionAndUser()[1]
+    workflow_id = uuid(param.workflow_id)
+    
+    // 检查工作流定时是否已经被删除
+    workflow_schedule_jobs = loadTable("dfs://workflow_schedule_jobs", "schedule_jobs")
+
+    schedule_info = last(select * from workflow_schedule_jobs where username = user and wid = workflow_id)
+    if (schedule_info.isDeleted[0]==true){throw toStdJson({"code": "S039"})}
+
+    // 记录标为deleted
+    update schedule_info set isDeleted = true, funcCode = blob(string(NULL)), updateTime = now()
+    workflow_schedule_jobs.append!(schedule_info)
+
+    // deleteScheduledJob
+    try{deleteScheduledJob(schedule_info.jobId[0])}catch(ex){throw toStdJson({"code": "S098"})}
+}
+
+
+// 定时设置
+def facplf_schedule_workflow(param) {
+    // 提取运行参数
+    user = getCurrentSessionAndUser()[1]
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    schedule_jobs = loadTable("dfs://workflow_schedule_jobs", "schedule_jobs")
+
+    workflow_id = uuid(param.workflow_id)
+    workflow_info = last(select * from job_list where id = workflow_id and type=1 and username = user);
+    //workflowJobId = username_wid_time
+    workflowJobId = (user + "_" + regexReplace(string(workflow_id), "-", "_") + "_" + string(now()).strReplace(":", "").strReplace(".", ""))
+    
+    //工作流被删除或工作流参数为空
+    if ((workflow_info.isDeleted[0]==true) or (count(workflow_info.parameter[0]) == 0)){
+        throw toStdJson({"code": "S037"})
+    }
+
+    // 原有的定时任务删除
+    workflow_schedule_info = last(select * from schedule_jobs where wid = workflow_id and username = user)
+    if (workflow_schedule_info.isDeleted[0]==false){
+        facplf_delete_schedule_workflow(param)
+    }
+
+    // 获得顺序
+    graph_data = parseExpr(string(workflow_info.parameter[0])).eval()
+    graph = facplf_parse_graph(graph_data.edges, graph_data.nodes.keys())
+    orders = iif(count(graph_data.nodes.keys())>1, facplf_parse_orders(graph), graph_data.nodes.keys())
+
+    myFunc = facplf_workflow_schedule_helper{orders, graph_data.nodes, workflow_id, workflowJobId, workflow_info.comment[0]}
+
+    if (param.frequency == 'D'){
+        scheduleJob(workflowJobId, workflow_info.comment[0], myFunc, minute(param.run_times), date(param.start_date), date(param.end_date), param.frequency, onComplete = facplf_schedule_workflow_job_id)
+    } else {
+        scheduleJob(workflowJobId, workflow_info.comment[0], myFunc, minute(param.run_times), date(param.start_date), date(param.end_date), param.frequency, param.days, onComplete = facplf_schedule_workflow_job_id)
+    }
+
+    tb = table(
+        uuid(param.workflow_id) as wid, 
+        workflowJobId as jobId, 
+        user as username, 
+        date(param.start_date) as startDate, 
+        date(param.end_date) as endDate, 
+        param.frequency as frequency, 
+        concat(param.run_times,",") as scheduledTime, 
+        iif(!isVoid(param.days),concat(param.days,","),'') as days, 
+        now() as updateTime, 
+        string(myFunc) as funcCode, 
+        false as isDeleted)
+    schedule_jobs.append!(tb)
+}
+facplf_add_functionview("facplf_schedule_workflow");go
+
+// 获取工作流定时任务信息
+def facplf_get_schedule_workflow(param) {
+    user = getCurrentSessionAndUser()[1]
+    schedule_jobs = loadTable("dfs://workflow_schedule_jobs", "schedule_jobs")
+
+    workflow_schedule_info = last(select * from schedule_jobs where wid = uuid(param.workflow_id) and username = user)
+    if (!isValid(workflow_schedule_info.wid[0]) or workflow_schedule_info.isDeleted == true) {
+        return NULL
+    }
+    if (workflow_schedule_info.isDeleted[0]==true){
+        throw toStdJson({"code": "S039"})
+    }
+
+    ret = dict(STRING,ANY)
+    ret["start_date"] = workflow_schedule_info.startDate[0]
+    ret["end_date"] = workflow_schedule_info.endDate[0]
+    ret["run_times"] = workflow_schedule_info.scheduledTime[0].split(',')
+    ret["frequency"] = workflow_schedule_info.frequency[0]
+    ret["days"] = iif(count(workflow_schedule_info.days[0])!=0, int(workflow_schedule_info.days[0].split(',')), int(NULL))
+    return ret
+}
+
+// 保存工作流流程信息
+def facplf_save_workflow_graph(param) {
+    user = getCurrentSessionAndUser()[1]
+    workflow_job_list = loadTable("dfs://workflow_job_list", "job_list")
+    scheduled_job_list = loadTable("dfs://workflow_schedule_jobs", "schedule_jobs")
+
+    // 确定工作流存在
+    existing_wid = select * from workflow_job_list where username = user and id = uuid(param.workflow_id) order by updateTime desc limit 1
+    existing_wid = select * from existing_wid where isDeleted = false
+    if (count(existing_wid)==0) {throw toStdJson({code:"S037"})}
+    
+    // 比较当前图信息是否一致
+    ex = existing_wid.parameter[0]
+    nw = toStdJson(param.graph_data)
+    // 如不一致，则确定当前无有效定时任务设置（有定时任务则无法修改）
+    if (!eqObj(ex,nw)){
+        existing_schedule = select * from scheduled_job_list where username = user and string(wid) = param.workflow_id order by updateTime desc limit 1
+        existing_schedule = select * from existing_schedule where isDeleted = false
+        if (size(existing_schedule) != 0) {throw toStdJson({code:"S040"})}
+    }
+    
+    prev_tb = select * from workflow_job_list where username = user and string(id) = param.workflow_id order by updateTime desc
+    prev_tb = select * from prev_tb limit 1
+    tb = table(uuid(param.workflow_id) as id, string(prev_tb.jobName) as jobName, user as username, now() as updateTime, blob(toStdJson(param.graph_data)) as parameter, int(prev_tb.type) as type, int(NULL) as jobType, string(prev_tb.comment) as comment, false as isDeleted)
+
+    workflow_job_list.append!(tb)
+}
+
+//获取工作流详情
+def facplf_get_workflow_detail(param){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    run_info = loadTable("dfs://workflow_run_info", "run_info")
+    res = dict(STRING, ANY)
+
+    wf = select * from job_list where id = uuid(param.workflow_id) and type = 1 context by id limit -1
+    wf = select * from wf where isDeleted = false
+    if (wf.count() == 0){throw toStdJson({code: 'S037', message: '工作流不存在'})}
+
+    res["workflow_id"] = wf.id[0]
+    res["workflow_name"] = wf.jobName[0]
+    //runrecord
+    rrc = select * from run_info where wid = wf.id[0] context by workflowJobId limit -1
+    record = exec workflowJobId from rrc where isDeleted = false
+    res["run_record_count"] = count(record)
+    res["update_time"] = wf.updateTime[0]
+    res["comment"] = wf.comment[0]
+
+    res["graph_data"] = string(wf.parameter[0])
+
+    return res
+}
+
+//获取工作流运行记录列表
+def facplf_get_workflow_run_list(param){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    run_info = loadTable("dfs://workflow_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    res = dict(STRING, ANY)
+
+    //info
+    workflow_id = uuid(param.workflow_id)
+    info = select jobName, updateTime,comment, username, isDeleted from job_list where id = workflow_id context by id limit -1
+    info = select jobName as workflow_name, updateTime as update_time,comment, username as creator from info where isDeleted = false
+    if (count(info) == 0){throw toStdJson({code: 'S037'})}
+    res["info"] = info[0]
+
+    //items
+    wfrun = select workflowJobId, taskJobId, first(startTime) as create_time, isDeleted from run_info where wid = workflow_id context by workflowJobId order by startTime
+    
+    if (count(wfrun) == 0){
+        res["items"] = array(ANY)
+        res["total"] = 0
+        return res
+    }
+
+    tasklist = exec distinct taskJobId from wfrun
+    status_tb = select jobId as taskJobId, endTime, errorMsg from status_info where jobId in tasklist and jobType = 3 context by jobId limit -1
+    status_tb["status"] = each(facplf_parse_job_status, status_tb)
+    items = select workflowJobId as run_id, create_time, facplf_get_multi_tests_status(status) as status from lj(wfrun, status_tb, `taskJobId) context by workflowJobId limit -1
+    items["run_name"] = "run_" + string(rowNo(items["run_id"]) + 1)
+
+    res["items"] = select * from items order by create_time desc
+    res["total"] = count(items)
+
+    return res
+}
+
+
+//获取工作流运行记录详情
+def facplf_get_workflow_run_detail(param){
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    run_info = loadTable("dfs://workflow_run_info", "run_info")
+    res = dict(STRING, ANY)
+
+    //run
+    tskrun = select * from run_info where workflowJobId = param.run_id context by taskJobId limit -1
+    tskrun = select * from tskrun where isDeleted = false
+    if (tskrun.count() == 0){throw toStdJson({code: 'S041'})}
+
+    items = []
+    for(i in tskrun){
+        item = dict(STRING, ANY)
+        item["task_name"] = i.taskName
+        item["job_type"] = i.type
+        item["start_time"] = i.startTime
+        item["run_node"] = i.clusterNode
+        item["status"] = facplf_get_job_status(i.taskJobId, 3, i.clusterNode)
+        items.append!(item)
+    }
+    res["items"] = items
+    res["total"] = items.count()
+
+    //info
+    wflist = select * from job_list where id = tskrun.wid[0] context by id limit -1
+    wflist = select * from wflist where isDeleted = false
+    if (wflist.count() == 0){throw toStdJson({code: 'S037'})}
+
+    info = dict(STRING, ANY)
+    info["workflow_name"] = wflist.jobName[0]
+    info["update_time"] = wflist.updateTime[0]
+    info["comment"] = wflist.comment[0]
+    info["creator"] = wflist.username[0]
+
+    res["info"] = info
+
+    return res
+}
+
+
+
+
+////////////////////
+///工作流-定时任务///
+///////////////////
+
+def facplf_get_schedule_workflow_list() {
+    user = getCurrentSessionAndUser()[1]
+    schedule_jobs = loadTable("dfs://workflow_schedule_jobs", "schedule_jobs")
+    job_list = loadTable("dfs://workflow_job_list", "job_list")
+    
+    schedule_list = select * from schedule_jobs where username = user context by wid limit -1
+    schedule_list = select * from schedule_list where isDeleted = false;
+    
+    job_info = select * from job_list where username = user and type=1 context by id limit -1
+    job_info = select * from job_info where isDeleted = false;
+
+    ret = select s.wid as workflow_id, date(startDate) as start_date, date(endDate) as end_date, scheduledTime.split(',') as run_times, frequency, iif(count(days)!=0, int(days.split(',')), int(NULL)) as days, j.jobName as workflow_name from schedule_list s left join job_info j on s.wid=j.id
+    
+    res = dict(STRING,ANY)
+    res["items"] = ret
+    res["total"]=size(ret)
+    return res
+}
+
+

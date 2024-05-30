@@ -1,0 +1,702 @@
+/////////////////////
+///////函数库////////
+////////////////////
+
+// 获取因子评价函数库列表
+def facplf_analysis_lib_list() {
+    user = getCurrentSessionAndUser()[1]
+    lib_tb = loadTable("dfs://analysis_library_info", "library_info")
+    
+    //获取用户当前权限
+    access = facplf_get_user_access(user)
+
+    // 权限验证
+    // 公司admin，公司reviewer，部门admin，因子人员
+    if (!((user == "admin") || access.isReviewer[0] || access.isDeptAdmin || access.isDeptFacEditor)) {
+        throw toStdJson({code:"S057"})
+    }
+
+    // 获取所有
+    lib_display = select * from lib_tb context by alid limit -1
+    lib_display = select * from lib_display where isDeleted = false
+
+    // 返回数据
+    tmp = select alid as lib_id, moduleName as name, tags, iif(username == "DolphinDB", false, true) as is_custom, createTime as create_time, updateTime as update_time, username as creator, comment, code as source_code from lib_display order by createTime desc
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`items] = tmp
+    tmp_dict[`total] = size(tmp)
+
+    return tmp_dict
+}
+
+// 新建因子评价函数库
+def facplf_create_new_analysis_lib(param) {
+    user = getCurrentSessionAndUser()[1]
+    lib_info = loadTable("dfs://analysis_library_info", "library_info")
+
+    //重名检查
+    lib_tb = select alid, moduleName, isDeleted from lib_info context by alid limit -1
+    lib_tb = select * from lib_tb where moduleName = param.name and isDeleted = false
+    if(count(lib_tb)!=0){throw toStdJson({code:"S083"})}
+
+    code = "module " + param.name + "\n" + ''
+
+    // 存入标签
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 4)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    new_alid = rand(uuid(), 1)[0]
+    new_tb = table(new_alid as alid, param.name as moduleName, user as username, now() as createTime, now() as updateTime, code as code, concat(tmp_tags, ",") as tags, string(param.comment) as comment, false as isDeleted)
+    lib_info.append!(new_tb)
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`lib_id] = string(new_alid)
+    return tmp_dict
+}
+
+// 删除因子评价函数库
+def facplf_delete_analysis_lib(param) {
+    user = getCurrentSessionAndUser()[1]
+    lib_info = loadTable("dfs://analysis_library_info", "library_info")
+
+    // 存在检查
+    id = uuid(param.lib_id)
+    lib_tb = select * from lib_info where alid = id context by alid limit -1
+    lib_tb = select * from lib_tb where isDeleted = false
+    if (count(lib_tb)==0) {throw toStdJson({code:"S084"})}
+
+    // 鉴权
+    access = facplf_get_user_access(user)
+    if (!((user == "admin") || access.isReviewer[0] || user == lib_tb.username[0])) {
+        throw toStdJson({code:"S057"})
+    }
+
+    // 删除
+    update lib_tb set updateTime = now(), code = string(NULL), tags = string(NULL), comment = user, isDeleted = true
+    lib_info.append!(lib_tb)
+}
+
+// 获取因子评价函数库详情
+def facplf_analysis_lib_detail(param) {
+    // user = getCurrentSessionAndUser()[1]
+    lib_tb = select * from loadTable("dfs://analysis_library_info", "library_info") where alid = uuid(param.lib_id) context by alid limit -1
+    lib_tb = select * from lib_tb where isDeleted = false
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict[`lib_id] = lib_tb.alid[0]
+    tmp_dict[`name] = lib_tb.moduleName[0]
+    tmp_dict[`tags] = lib_tb.tags[0]
+    tmp_dict[`is_custom] = iif(lib_tb.username[0] == 'DDB' or lib_tb.username[0] == 'DolphinDB', false, true)
+    tmp_dict[`create_time] = lib_tb.createTime[0]
+    tmp_dict[`update_time] = lib_tb.updateTime[0]
+    tmp_dict[`creator] = lib_tb.username[0]
+    tmp_dict[`comment] = lib_tb.comment[0]
+    tmp_dict[`source_code] = facplf_parse_moduleCode(lib_tb.code[0])
+
+    return tmp_dict
+}
+
+
+// 修改因子评价函数库元信息
+// 只有创建者能够修改
+def facplf_edit_analysis_lib(param) {
+    user = getCurrentSessionAndUser()[1]
+    lib_info = loadTable("dfs://analysis_library_info", "library_info")
+    
+    // 存在检查
+    id = uuid(param.lib_id)
+    lib_tb = select * from lib_info where alid = id context by alid limit -1
+    lib_tb = select * from lib_tb where isDeleted = false
+    if (count(lib_tb)==0) {throw toStdJson({code:"S084"})}
+
+    // 权限检查
+    if(lib_tb["username"] != user) {throw toStdJson({code:"S057"})}
+
+    // 重名检查
+    lib_name = select * from lib_info where alid != uuid(param.lib_id) context by alid limit -1
+    lib_name = select * from lib_name where isDeleted = false and moduleName = param.name 
+    if(count(lib_name)!=0){throw toStdJson({code:"S083"})}
+
+    // tags更新
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL
+    try{facplf_save_tag(tmp_tags, 4)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    // 修改code中module xxx
+    prev_code = lib_tb.code[0]
+    prev_code_funcs = concat(prev_code.split("\n")[1:], "\n")
+    new_code_first_line = "module " + param.name
+    new_code = new_code_first_line + "\n" + prev_code_funcs
+
+    //写表
+    update lib_tb set moduleName = param.name, updateTime = now(), code = new_code, tags = concat(tmp_tags, ","), comment = string(param.comment)
+    lib_info.append!(lib_tb)
+}
+
+
+// 保存因子评价函数库代码
+def facplf_save_analysis_lib_code(param) {
+    user = getCurrentSessionAndUser()[1]
+    lib_info = loadTable("dfs://analysis_library_info", "library_info")
+
+    // 存在检查
+    lib_tb = select * from lib_info where alid = uuid(param.lib_id) context by alid limit -1
+    lib_tb = select * from lib_tb where isDeleted = false
+    if (count(lib_tb) == 0) {throw toStdJson({code:"S084"})}
+
+    code_firstline = "module " + lib_tb.moduleName[0]
+
+    // // 代码不能为空
+    // if (param.code == NULL) {throw toStdJson({code:"S028"})}
+    
+    // // 试运行
+    // try {
+    //     loadModuleFromScript(datalib.moduleName, [code_firstline + "\n" + param.code], true)
+    // } catch(ex) {throw toStdJson(dict(`code`variables,["S047", ex[0]+": "+ex[1]]))}
+    
+    update lib_tb set updateTime = now(), code = code_firstline + "\n" + string(param.code)
+    lib_info.append!(lib_tb)
+}
+
+
+///////////////////
+///////模板////////
+///////////////////
+
+// 获取因子评价模板列表
+/**
+ * @description: 获取template_info里所有有效(isDeleted = false)的信息
+ * @return {
+    items: AnalysisTemplate[],
+    total: number
+    }
+ */
+def facplf_analysis_template_list(){
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    run_info = loadTable("dfs://analysis_run_info", "run_info")
+    // 获取用户当前权限
+    access = facplf_get_user_access(user)
+    // 权限验证, 需要是公司admin, 公司reviewer, 部门admin, 因子人员
+    if (!(user == "admin" || access.isReviewer[0] || access.isDeptAdmin || access.isDeptFacEditor)){
+        throw toStdJson({code: "S057"})
+    }
+    // 获取所有数据
+    template_all = select * from template_info context by atid limit -1
+    template_all = select * from template_all where isDeleted = false
+    // 获取 run_record_count 运行记录数
+    template_atid = template_all["atid"]
+    run_all = select atid, jobId, isDeleted from run_info where username = user and atid in template_atid context by jobId limit -1
+    run_all = select atid, count(*) run_record_count from run_all where isDeleted = false group by atid
+    // 返回数据
+    res = select atid as template_id, templateName as name, tags, run_record_count, iif(username == "DolphinDB", false, true) as is_custom, createTime as create_time, updateTime as update_time, username as creator, comment, code as source_code, config as visual_config from template_all t left join run_all r on t.atid = r.atid order by createTime desc
+    // 处理 run_record_count 为空的数据
+    update res set run_record_count = run_record_count.nullFill(0)
+    res_dict = dict(STRING, ANY)
+    res_dict["items"] = res
+    res_dict["total"] = size(res)
+    return res_dict
+}
+
+// 新建因子评价模板
+/**
+ * @param name: 模板名
+ * @param tags: 标签
+ * @param comment: 备注
+ * @return template_id: 分析模板id
+ */
+def facplf_create_new_analysis_template(param){
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    library_info = loadTable("dfs://analysis_library_info", "library_info")
+    // 与现有 DolphinDB 内置函数进行重名检查
+    if (count(defs(param.name)) != 0){
+        throw toStdJson(dict(`code`variables, ["S091", param.name]))
+    }
+    template = select templateName, isDeleted from template_info context by atid limit -1
+    template = select * from template where isDeleted = false and templateName = param.name
+    // 重名检查
+    if (count(template) != 0){
+        throw toStdJson({code: "S086"})//message: "该因子评价模板名称已存在"
+    }
+    // 预设模板
+    template_code = exec code from template_info where username = "DolphinDB" and templateName = "demoMain" order by createTime limit 1
+    // 获取所有函数库
+    library_all = select * from library_info context by alid limit -1
+    library_all = select * from library_all where isDeleted = false
+    // 生成：函数名和模板名一致
+    def_pos = strpos(template_code, 'def')
+    ct_code = substr(template_code, def_pos, strlen(template_code))
+    end_pos = strpos(ct_code, "(") + def_pos
+    func_name = substr(template_code, def_pos+4, end_pos-4-def_pos).strReplace(" ", "")
+    part1 = substr(template_code, 0, def_pos+4)
+    part2 = substr(template_code, end_pos, strlen(template_code))
+    new_code = part1 + param.name + part2
+    // 试运行
+    if (count(new_code) > 0) {
+        // 按行取library_all, 取出来之后每一行是dict
+        for (line in library_all) {//line = library_all[1]
+            try {
+                loadModuleFromScript(line["moduleName"], line["code"], true)
+            }catch(ex) {}
+            // 
+            try {
+                loadModuleFromScript(param.name, "module " + param.name + "\n" + new_code, true)
+            }catch(ex) {
+                throw toStdJson(dict(`code`variables,["S047", ex[0] + ": " + ex[1]]))
+            }
+        }
+        tmp_lib_name = param.name + "::%"
+        tmp_params = select syntax from defs() where name like tmp_lib_name
+        params = substr(tmp_params.syntax[0], 1, strlen(tmp_params.syntax[0]) - 2)
+    } else {
+        params = string(NULL)
+        new_code = string(NULL)
+    }
+    // 试运行成功之后开始格式化数据，然后存入表格
+    // 标签
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where isVoid(tag) = false
+    try{facplf_save_tag(tmp_tags, 5)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    new_atid = rand(uuid(), 1)
+    comment = string(param.comment)
+    tb = table(
+        new_atid[0] as atid, 
+        param.name as templateName, 
+        user as username, 
+        now() as createTime, 
+        now() as updateTime, 
+        new_code as code, 
+        string(params) as parameter,
+        string(NULL) as config,
+        concat(tmp_tags, ",") as tags, 
+        comment as comment, 
+        false as isDeleted
+    )
+    template_info.append!(tb)
+
+    tmp_dict = dict(STRING, ANY)
+    tmp_dict["template_id"] = new_atid[0]
+    return tmp_dict
+}
+
+// 复制因子评价模板
+/**
+ * @param template_id: 需要复制的模板id
+ * @param name: 新模板名
+ * @param tags: 标签
+ * @param comment: 备注
+ * @return new_id: 复制成功的新模板id
+ */
+ def facplf_copy_analysis_template(param) {
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    library_info = loadTable("dfs://analysis_library_info", "library_info")
+    template = select * from template_info context by atid limit -1
+    template = select * from template where isDeleted = false
+    // 重名检查
+    nameCheck = select templateName from template where templateName = param.name
+    if (count(nameCheck) != 0){
+        throw toStdJson({code: "S086"})//message: "该因子评价模板名称已存在"
+    }
+    // 与现有 DolphinDB 内置函数进行重名检查
+    if (count(defs(param.name)) != 0){
+        throw toStdJson(dict(`code`variables, ["S091", param.name]))
+    }
+    // 取出需要复制的template
+    editTable = select * from template where atid = uuid(param.template_id)
+    // 替换code的主函数名
+    new_code = facplf_edit_code(editTable.code[0], editTable.templateName[0], param.name)
+    // 获取所有函数库
+    library_all = select * from library_info context by alid limit -1
+    library_all = select * from library_all where isDeleted = false
+    // 试运行
+    if (count(new_code) > 0) {
+        // 加载所有函数库
+        for (line in library_all) {//line = library_all[1]
+            try {
+                loadModuleFromScript(line["moduleName"], line["code"], true)
+            }catch(ex) {}
+        }
+        try {
+            runScript(new_code)
+        }catch(ex) {
+            throw toStdJson(dict(`code`variables,["S047", ex[0] + ": " + ex[1]]))
+        }
+        tmp_lib_name = param.name + "::%"
+        tmp_params = select syntax from defs() where name like tmp_lib_name
+        params = substr(tmp_params.syntax[0], 1, strlen(tmp_params.syntax[0]) - 2)
+    } else {
+        params = string(NULL)
+        new_code = string(NULL)
+    }
+    // 标签
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where isVoid(tag) = false
+    try{facplf_save_tag(tmp_tags, 5)}catch(ex) {throw toStdJson({code:"S090"})}
+    new_atid = rand(uuid(), 1)[0]
+    // 开始修改
+    update editTable set atid = new_atid, templateName = param.name, username = user, createTime = now(), updateTime = now(), code = new_code, tags = tmp_tags, comment = string(param.comment)
+    // 存表
+    template_info.append!(editTable)
+    res = dict(STRING, ANY)
+    res["new_id"] = new_atid
+    return res
+}
+
+// 删除因子评价模板
+/**
+ * @description: 根据传入的template_id修改该id下的相关信息，并把isDeleted设置为true
+ * @param template_id: 分析模板id, template_info里的atid字段
+ */
+def facplf_delete_analysis_template(param){
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    template_id = uuid(param["template_id"])
+    // 存在检查
+    template = select * from template_info where atid = template_id context by atid limit -1
+    template = select * from template where isDeleted = false
+    if (count(template) == 0) {
+        throw toStdJson({code: "S087"})//message: "该因子评价模板不存在"
+    }
+    // 权限验证, 需要是公司admin, 公司reviewer, 部门admin, 因子人员
+    access = facplf_get_user_access(user)
+    if (!(user == "admin" || access.isReviewer[0] || access.isDeptAdmin || access.isDeptFacEditor)){
+        throw toStdJson({code: "S057"})//message: "无操作权限"
+    }
+    // 删除
+    update template set updateTime = now(), code = string(NULL), parameter = string(NULL), config = string(NULL), tags = string(NULL), comment = user, isDeleted = true
+    template_info.append!(template)
+}
+
+// 获取因子评价模板参数
+def facplf_get_analysis_template_params(param){
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    param_info = loadTable("dfs://preset_param_info", "param_info")
+    id = uuid(param.template_id)
+    ddb_preset = string(exec distinct atid from template_info where username = "DolphinDB")
+    if (param.template_id in ddb_preset){
+        ret = (exec preset from param_info where presetType = 'analysis_template_' + string(param.template_id) and username = 'DolphinDB')[0]
+        ret = fromJson(ret)
+        return ret
+    }else{
+        //用户自定义模板
+        existing_atid = select atid, updateTime, isDeleted from template_info context by atid order by atid, updateTime desc limit 1
+        existing_atid = exec atid from existing_atid where isDeleted = false
+        if (!(id in existing_atid)){
+            throw toStdJson({code: "S087"})
+        }
+        temp_param = exec parameter from template_info where atid = id order by updateTime desc limit 1
+        res = array(ANY)
+        if (!isNull(temp_param)){
+            for (p in temp_param[0].split(",")) {
+                tmp = dict(STRING, ANY)
+                tmp["name"] = p
+                tmp["type"] = NULL
+                res.append!(tmp)
+            }
+        }
+        return res  
+    }
+}
+
+// 获取因子评价模板详情
+/**
+ * @description: 根据template_id获取该id下的相关信息，按照指定的字段名返回
+ * @param template_id: 分析模板id, template_info里的atid字段
+ * @return: dict形式的模板详情信息
+ */
+def facplf_analysis_template_detail(param){
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    run_info = loadTable("dfs://analysis_run_info", "run_info")
+    template_id = uuid(param.template_id)
+    template = select * from template_info where atid = template_id context by atid limit -1
+    template = select * from template where isDeleted = false
+    // 获取 run_record_count 运行记录数
+    template_atid = template["atid"]
+    run_all = select atid, jobId, isDeleted from run_info where username = user and atid in template_atid context by jobId limit -1
+    run_all = select atid, count(*) run_record_count from run_all where isDeleted = false group by atid
+    // 返回数据
+    detail_dict = (
+        select 
+            atid as template_id,
+            templateName as name,
+            tags,
+            run_record_count,
+            iif(username == "DDB" or username == "DolphinDB", false, true) as is_custom,
+            createTime as create_time,
+            updateTime as update_time,
+            username as creator,
+            comment,
+            code as source_code,
+            config as visual_config
+        from template t left join run_all r on t.atid = r.atid
+    )
+    // 处理 run_record_count 为空的数据
+    update detail_dict set run_record_count = run_record_count.nullFill(0)
+    detail_dict = detail_dict[0]
+    return detail_dict
+}
+
+// 修改因子评价模板元信息(只有创建者能够修改)
+/**
+ * @param template_id: 分析模板id, template_info里的atid字段
+ * @param name: 模板名
+ * @param tags: 标签
+ * @param comment: 备注
+ */
+def facplf_edit_analysis_template(param){
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    // 与现有 DolphinDB 内置函数进行重名检查
+    if (count(defs(param.name)) != 0){
+        throw toStdJson(dict(`code`variables, ["S091", param.name]))
+    }
+    template_id = uuid(param["template_id"])
+    // 存在检查
+    template = select * from template_info where atid = template_id context by atid limit -1
+    template = select * from template where isDeleted = false and username = user
+    // 权限检查
+    if (template["username"] != user){
+        throw toStdJson({code: "S057"})//message: "无操作权限"
+    }
+    // 重名检查(可以和自己重名)
+    prev_name = template["templateName"][0]
+    existing_temp = select templateName, isDeleted from template_info where templateName != prev_name context by atid limit -1
+    existing_temp = select * from existing_temp where isDeleted = false
+    if (param["name"] in existing_temp["templateName"]) {
+        throw toStdJson({code: "S086"})//message: "该因子评价模板名称已存在"
+    }
+    // 取出code修改函数名
+    if (!isNull(template.code[0])) {
+        new_code = facplf_edit_code(template.code[0], template.templateName[0], param.name)
+    }
+    
+    // tags更新
+    tmp_tags = table(strip(param.tags.split(",")) as tag)
+    tmp_tags = exec * from tmp_tags where tag != NULL 
+    try{facplf_save_tag(tmp_tags, 5)}catch(ex) {throw toStdJson({code:"S090"})}
+
+    //写表
+    update template set templateName = param.name, updateTime = now(), code = new_code, tags = concat(tmp_tags, ","), comment = string(param.comment)
+    template_info.append!(template)
+}
+
+// 保存因子评价模板代码
+/**
+ * @param template_id: 分析模板id, template_info里的atid字段
+ * @param code: 模板代码
+ */
+def facplf_edit_analysis_template_code(param){
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    library_info = loadTable("dfs://analysis_library_info", "library_info")
+    template_id = uuid(param["template_id"])
+    // 存在检查
+    template = select * from template_info where atid = template_id context by atid limit -1
+    template = select * from template where isDeleted = false
+    if (count(template) == 0){
+        throw toStdJson({code: "S087"})//message: "该因子评价模板不存在"
+    }
+    library = select alid, moduleName, code, isDeleted, updateTime from library_info context by alid limit -1
+    library = select moduleName, code from library where isDeleted = false
+    // 代码校验, 获取参数
+    syntax = facplf_code_check_run_clear_cache(param.code, library, template.templateName[0])
+    // 写入
+    update template set updateTime = now(), code = string(param.code), parameter = syntax
+    template_info.append!(template)
+}
+
+// 保存因子评价模板可视化数据
+/**
+ * @description: 对用户传入的visual_config进行保存更新
+ * @param template_id: 因子模板id
+ * @param visual_config: json文本
+ */
+def facplf_edit_analysis_template_config(param) {
+    user = getCurrentSessionAndUser()[1]
+    template_info = loadTable("dfs://analysis_template_info", "template_info")
+    template_id = uuid(param.template_id)
+    template = select * from template_info where atid = template_id and username = user context by atid limit -1
+    template = select * from template where isDeleted = false
+    // 存在检查
+    if (count(template) == 0) {
+        throw toStdJson({code: "S087"})//message: "该因子评价模板不存在"
+    }
+    update template set updateTime = now(), config = blob(param["visual_config"])
+    template_info.append!(template)
+}
+
+// 查询评价记录
+/**
+ * @description: 多条件模糊查询
+ * @param type: 因子分析类型，枚举类型INT[1:公开因子, 2:私有因子, 3:直接运行]
+ * @param keyword: 关键词, funcName字段里的因子名或者模板名(用::分隔)
+ * @param test_id: 测试任务id, testJid字段
+ * @param factor_id: 因子id, job_test_info里的fid字段
+ * @param analysis_template_id: 分析模板id, atid字段
+ * @param status: 运行状态, status字段
+ * @param create_time: 创建时间, 用数组表示的时间区间STRING[start_time, end_time]
+ * @return {items: AnalysisRecord[], total: number}
+ */
+def facplf_get_analysis_records(param) {
+    user = getCurrentSessionAndUser()[1]
+    run_info = loadTable("dfs://analysis_run_info", "run_info")
+    status_info = loadTable("dfs://job_status_info", "status_info")
+    
+    //更新任务状态
+    try{facplf_update_job_status()}catch(ex){}
+
+    // 筛选出需要的字段
+    run = select aid, atid, tempName, funcName, username, testJid, jobId, jobType, createTime, clusterNode, isDeleted from run_info where username = user context by aid limit -1
+    run = select aid, atid, tempName, funcName, username, testJid, jobId, jobType, createTime, clusterNode from run where isDeleted = false order by createTime desc
+
+    status = select jobId, startTime, endTime, errorMsg from status_info where jobType = 2 and userID = user context by jobId limit -1
+    // 解析任务运行状态
+    run_sta_table = select r.*, s.endTime, s.errorMsg from run r left join status s on r.jobId = s.jobId
+    // 如果run_sta_table表为空, 直接按照指定字段名返回结果
+    if (count(run_sta_table) == 0) {
+        run_sta_table["status"] = int(NULL)
+        res = select aid as analysis_record_id, jobType as analysis_type, funcName.split("::")[0] as factor_name, funcName.split("::")[1] as func_name, atid as analysis_template_id, tempName as analysis_template_name, createTime as create_time, username as creator, status from run_sta_table
+        res_dict = dict(STRING, ANY)
+        res_dict["items"] = res
+        res_dict["total"] = size(res)
+        return res_dict
+    }else{
+        run_sta_table["status"] = each(facplf_parse_job_status, run_sta_table)
+        run = select aid, atid, tempName, funcName, username, testJid, jobId, jobType, createTime, status from run_sta_table
+        // 并行查询
+        whereConditions = array(STRING)
+        if (size(param.type) != 0) {
+            whereConditions.append!("jobType in (" + concat(param.type, ', ') + ")")
+        }
+        if (param.keyword != null) {
+            whereConditions.append!("funcName like '%" + param.keyword + "%'")
+        }
+        if (param.test_id != null) {
+            whereConditions.append!("testJid = '" + param.test_id + "')")
+        }
+        // factor_id是因子草稿模块跳转过来的参数，使用这两个参数的时候隐藏其他筛选条件控件, factor_id   != null时，要去test_info里拿factor_id对应的jobId，然后将test_info.jobId作为run_info里的筛 选条件，然后返回res_dict
+        if (param.factor_id != null) {
+            test_info = loadTable("dfs://job_test_info", "test_info")
+            factor_id = uuid(param.factor_id)
+            test = select fid, jobId, isDeleted from test_info where fid = factor_id and    username = user context by jobId limit -1
+            test_jobid = (exec jobId from test where isDeleted = false).concat("', '"). string()
+            whereConditions.append!("testJid in ('" + test_jobid + "')")
+        }
+        if (count(param.analysis_template_ids) != 0) {
+            whereConditions.append!("atid in uuid(['" + param.analysis_template_ids.concat("', '") + "'])")
+        }
+        if (typestr(param.status) == "FAST INT VECTOR") {
+            whereConditions.append!("status in (" + concat(param.status, ', ') + ")")
+        }
+        // 目前的时间筛选粒度精细到年-月-日, run_info里的createTime是TIMESTAMP类型, 需要转换为DATE  类型才能行比较
+        if (param.create_time[0] != null) {
+            whereConditions.append!("date(createTime) >= date(" + param.create_time[0] + ") ")
+        }
+        if (param.create_time[1] != null) {
+            whereConditions.append!("date(createTime) <= date(" + param.create_time[1] + ") ")
+        }
+        // 动态生成sql语句
+        whereConditions = parseExpr(whereConditions)
+        res = sql(select=(sqlColAlias(<aid>, "analysis_record_id"), sqlColAlias(<jobType>, "analysis_type"), sqlColAlias(<funcName.split("::")[0]>, "factor_name"), sqlColAlias(<funcName.split("::")[1]>, "func_name"), sqlColAlias(<atid>, "analysis_template_ids"), sqlColAlias(<tempName>, "analysis_template_name"), sqlColAlias(<createTime>, "create_time"), sqlColAlias(<username>, "creator"), sqlCol("status")), from=run, where=whereConditions).eval()
+        // 返回结果
+        res_dict = dict(STRING, ANY)
+        res_dict["items"] = res
+        res_dict["total"] = size(res)
+        return res_dict
+    }
+}
+
+// 删除评价记录
+/**
+ * @description: 根据用户传入的analysis_record_id删除该id的评价记录，需要将createTime，parameter，config设置为NULL，isDeleted设置为true
+ * @param analysis_record_id: 评价报告id，等于run_info里的aid
+ */
+def facplf_delete_analysis_record(param) {
+    user = getCurrentSessionAndUser()[1]
+    run_info = loadTable("dfs://analysis_run_info", "run_info")
+    analysis_record_id = uuid(param["analysis_record_id"])
+    analysis = select * from run_info where aid = analysis_record_id and username = user context by aid limit -1
+    analysis = select * from analysis where isDeleted = false
+    // 存在检查
+    if (count(analysis) == 0) {
+        throw toStdJson({code: "S088"})//message: "该因子评价记录不存在"
+    }
+    update analysis set createTime = now(), parameter = NULL, config = NULL, isDeleted = true
+    run_info.append!(analysis)
+}
+
+// 获取评价记录详情
+/*
+ * @description: 根据用户传入的analysis_record_id来获取该id下的相关信息，并以dict的形式返回
+ * @param analysis_record_id: 评价报告id，等于run_info里的aid
+ * @return: 包含各种评价信息的dict
+ */
+def facplf_get_analysis_record_detail(param) {
+    run_info = loadTable("dfs://analysis_run_info", "run_info")
+    analysis_record_id = uuid(param["analysis_record_id"])
+    analysis = select * from run_info where aid = analysis_record_id context by aid limit -1
+    analysis = select * from analysis where isDeleted = false
+    // 存在检查
+    if (count(analysis) == 0) {
+        throw toStdJson({code: "S088"})//message: "该因子评价记录不存在"
+    }
+    return_dict = (
+        select
+            aid as analysis_record_id,
+            atid as analysis_template_id,
+            tempName as analysis_template_name,
+            funcName.split("::")[0] as factor_name,
+            funcName.split("::")[1] as func_name,
+            jobType as analysis_type,
+            username as creator,
+            createTime as create_time,
+            string(config) as visual_config
+        from analysis
+    )[0]
+    
+    return_dict["status"] = facplf_get_job_status(analysis.jobId[0], 2, analysis.clusterNode[0])
+    return_dict["params"] = iif(string(analysis.parameter[0]) != 'null', analysis.parameter[0], string(NULL))
+    return_dict["failed_reason"] = string(NULL)
+    try{
+        return_dict["result"] = rpc(analysis.clusterNode[0], getJobReturn, analysis.jobId[0])
+    }catch(ex){
+        return_dict["failed_reason"] = iif(return_dict["status"] == -1, rpc(analysis.clusterNode[0], getJobMessage, analysis.jobId[0]), string(NULL))
+    }
+    return return_dict
+}
+
+
+///////////////////
+///////运行////////
+///////////////////
+//运行单个因子测试评价
+def facplf_create_analysis_by_test(param) {
+    user = getCurrentSessionAndUser()[1]
+    test_info = loadTable("dfs://job_test_info", "test_info")
+    test_job = select jobId, funcName, clusterNode, category, isDeleted from test_info where jobId = param.test_id context by jobId limit -1
+    test_job = select * from test_job where isDeleted = false
+
+    type = test_job["category"][0] + 1
+
+    ret = facplf_run_analysis_helper(param.analysis_template, type, test_job["jobId"], test_job["clusterNode"][0], test_job["funcName"][0])   
+
+    return dict("analysis_record_id", ret["aly_run_id"][0])
+}
+
+//运行评价
+def facplf_run_analysis(param) {
+    if((param.type == 1) || (param.type == 2)) {
+        params = param
+        params["analysis"] = true
+        ret = facplf_create_factor_tests(params)
+    } else {
+        ret = facplf_run_analysis_helper(param.analysis_template, param.type)
+    }
+    return ret
+}

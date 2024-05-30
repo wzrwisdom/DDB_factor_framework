@@ -1,0 +1,7 @@
+def WQAlpha101(close, open, high, low){
+    return ((close - open) \ (high - low + 0.001));
+}
+
+def WQAlpha41(high, low, vwap){
+    return pow(high * low, 0.5) - vwap
+}
