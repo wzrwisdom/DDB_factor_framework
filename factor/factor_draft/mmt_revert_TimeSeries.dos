@@ -2,28 +2,31 @@ def close_ret_1m_rank(trade_time, close_ret) {
     return tmrank(trade_time, close_ret, ascending=true, window=1m, percent=true)
 }
 
-def intra_ret_1m_rank(trade_time, intra_ret) {
-    return tmrank(trade_time, intra_ret, ascending=true, window=1m, percent=true)
+def close_ret_60s_rank(close_ret) {
+    return mrank(close_ret, ascending=true, window=60, percent=true)
 }
 
-def intra_VP(trade_time, td_vol) {
-    return tmsum(trade_time, td_vol, 1m)/tmsum(trade_time, td_vol, 30m)
+def intra_ret_60s_rank(intra_ret) {
+    return mrank(intra_ret, ascending=true, window=60, percent=true)
+    // return tmrank(trade_time, intra_ret, ascending=true, window=1m, percent=true)
+}
+
+def intra_VP(td_vol) {
+    return msum(td_vol, 60) / msum(td_vol, 30*60)
+    // return tmsum(trade_time, td_vol, 1m)/tmsum(trade_time, td_vol, 30m)
 }
 
 def close_ret_ema(close_ret) {
-    return ema(close_ret, 10, warmup=false)
+    return ema(close_ret, 30, warmup=false)
 }
 
 def close_ret_10m_kurt(close_ret) {
-    // print(typestr(close_ret))
-    // print(close_ret)
-    result = mkurtosis(close_ret, 2*60)
-    // print(result)
+    result = mkurtosis(close_ret, 10*60)
     return result
 }
 
 
-def QRS(trade_time, td_buy_price, td_sell_price) {
+def QRS(td_buy_price, td_sell_price) {
     cur_window = 5*60
     zscore_window = 15*60
     support_p_std = mstd(td_buy_price, window=cur_window)
@@ -36,4 +39,19 @@ def QRS(trade_time, td_buy_price, td_sell_price) {
     rs_div = iif(support_p_std is null and resistance_p_std is not null, mmin(rs_div, window=cur_window), rs_div)
     
     return moving(my_zscore, (rs_div*rs_p_corr), zscore_window)
+}
+
+def QRS_extend(td_buy_price, td_sell_price) {
+    cur_window = 5*60
+    zscore_window = 15*60
+    support_p_std = mstd(td_buy_price, window=cur_window)
+    resistance_p_std = mstd(td_sell_price, window=cur_window)
+    rs_p_corr = mcorr(td_buy_price, td_sell_price, window=cur_window)
+
+    rs_div = resistance_p_std / support_p_std
+    rs_div = iif(resistance_p_std != 0 and support_p_std == 0, mmax(rs_div, window=cur_window), rs_div)
+    rs_div = iif(resistance_p_std is null and support_p_std is not null, mmax(rs_div, window=cur_window), rs_div)
+    rs_div = iif(support_p_std is null and resistance_p_std is not null, mmin(rs_div, window=cur_window), rs_div)
+    
+    return moving(my_zscore, (rs_div*rs_p_corr), zscore_window)*pow(rs_p_corr,2)
 }

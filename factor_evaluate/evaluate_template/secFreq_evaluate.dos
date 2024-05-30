@@ -48,16 +48,16 @@ def secFreq_evaluate(
     startTS = timestamp(string(startDate) + " " + string(startTime)) // 回测起始时间
     endTS = timestamp(string(endDate) + " " + string(endTime)) // 回测截止时间
     tradables = secFreq_eva_bt_lib::genTradables(price_tb, pric_secu_name, pric_time_name, startTS, endTS)
-    print("haha1")
+    
     // 按列合并因子数据
     factorsTable = secFreq_eva_bt_lib::processAndMergeFactors(factorData, factorNames, winsorFactorNames, tradables, startDate, endDate, startTime, endTime, z_flag=zscore_flag)
-    // select * from factorsTable limit 10
-    factorData = NULL
-    tradables = NULL
-    flushTSDBCache()
+
+    // factorData = NULL
+    // tradables = NULL
+    // flushTSDBCache()
     
     // 读取收益标签数据
-    print("haha2")
+    
     labelTable = secFreq_eva_bt_lib::calcLabel(price_col_name, pric_secu_name, pric_time_name, 
         price_tb, startDate, endDate, startTime, endTime, window=window, z_flag=zscore_flag)
     
@@ -80,9 +80,9 @@ def secFreq_evaluate(
     priceTable = secFreq_eva_bt_lib::loadPriceData(price_tb, pric_secu_name, pric_time_name, price_col_name,
         startDate, endDate, startTime, endTime)
         
-    price_tb = NULL
-    labelTable = NULL
-    flushTSDBCache()
+    // price_tb = NULL
+    // labelTable = NULL
+    // flushTSDBCache()
     
     // factorName = factorNewNames[0]
     
