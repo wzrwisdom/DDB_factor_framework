@@ -159,7 +159,7 @@ def secFreq_feat_factor_sql(fromDbNameStr, fromTbNameStr, featureStr, startDate,
     allcodes = sql(select=sqlColAlias(<distinct security_code>), 
         from=loadTable("dfs://CROSS_SECTION_6sec", "trade_info"),
         where=expr(sqlCol("trade_time", date),==,startDate)).eval()
-    codes_list = cut(allcodes, 10)
+    codes_list = cut(allcodes, 1000)
     // codes = codes[:10]
     index = 0
     for (codes in codes_list) {

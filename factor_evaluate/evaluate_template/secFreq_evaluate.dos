@@ -44,6 +44,7 @@ def secFreq_evaluate(
     // print(string(startDate) + " " + string(startTime))
     // print(string(endDate) + " " + string(endDate))
     // print(select * from price_tb limit 5)
+    // print(select * from factorData where value is not null limit 10)
     // 可交易时间和股票
     startTS = timestamp(string(startDate) + " " + string(startTime)) // 回测起始时间
     endTS = timestamp(string(endDate) + " " + string(endTime)) // 回测截止时间
@@ -51,7 +52,7 @@ def secFreq_evaluate(
     
     // 按列合并因子数据
     factorsTable = secFreq_eva_bt_lib::processAndMergeFactors(factorData, factorNames, winsorFactorNames, tradables, startDate, endDate, startTime, endTime, z_flag=zscore_flag)
-
+    // print(select * from factorsTable limit 10)
     // factorData = NULL
     // tradables = NULL
     // flushTSDBCache()

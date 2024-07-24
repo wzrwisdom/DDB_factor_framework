@@ -19,7 +19,6 @@ def intra_VP(td_vol) {
 def close_ret_ema(close_ret) {
     return ema(close_ret, 30, warmup=false)
 }
-
 def close_ret_10m_kurt(close_ret) {
     result = mkurtosis(close_ret, 10*60)
     return result

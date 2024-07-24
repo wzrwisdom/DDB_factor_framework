@@ -1,0 +1,3 @@
+def createFactorTable(dbName, tbName, initDb, initTb) {
+    CSVDataModule::createDBAndTable(dbName, tbName, initDb, initTb, CSVDataModule::createDatabase, CSVDataModule::createFactorTable)
+}

@@ -120,6 +120,8 @@ def processFactor(factorTable, tradables, wins=true, z_flag=true){
 def processAndMergeFactors(factorData, factorNameList, winsorFactorNameList, tradables, startDate, endDate, startTime, endTime, z_flag){
 	mergedFactorTable = tradables
 	for(factorName in factorNameList){
+        processedFactorTable = NULL
+        // print(select * from factorData where tradetime=2023.04.20T09:40:00.000 and securityid=`002976)
 		factorTable = getSingleFactor(factorData, factorName, startDate, endDate, startTime, endTime)
 		if(factorName in winsorFactorNameList){
 			processedFactorTable = processFactor(factorTable, tradables, z_flag=z_flag)
@@ -127,8 +129,13 @@ def processAndMergeFactors(factorData, factorNameList, winsorFactorNameList, tra
 		else{
 			processedFactorTable = processFactor(factorTable, tradables, wins=false, z_flag=z_flag)
 		}
+        // print(select * from processedFactorTable where securityid=`002976 limit 10)
 		factorName = factorName.strReplace("::", "__")
-		mergedFactorTable.update!(factorName, processedFactorTable.value)
+        cols = mergedFactorTable.colNames()
+        cols = each(sqlCol, cols)
+        cols.append!(sqlCol("value", alias=factorName))
+        mergedFactorTable = sql(select=cols, from=lj(mergedFactorTable, processedFactorTable, matchingCols=["securityid", "tradetime"])).eval()
+		// mergedFactorTable.update!(factorName, processedFactorTable.value)
 	}
 	// avg_factor = rowAvg(mergedFactorTable[factorNameList])
 	// update mergedFactorTable set avg=avg_factor
@@ -200,10 +207,16 @@ def loadFactorName(factorNamesDict){
     }
     for (fac_module in factorNamesDict.keys()) {
         cur_mod_factors = factorNamesDict[fac_module]
-        for (i_factor in cur_mod_factors) {
-            factor_name = fac_module + "::" + i_factor
-            factors.append!(factor_name)
+
+        if (fac_module == "") {
+            factors = join(factors, cur_mod_factors)
+        } else {
+            for (i_factor in cur_mod_factors) {
+                factor_name = fac_module + "::" + i_factor
+                factors.append!(factor_name)
+            }
         }
+        
     }
     return factors
 }
@@ -211,7 +224,8 @@ def loadFactorName(factorNamesDict){
 def getFactorTableByName(factor_name, cols, whereConditions, factor_table, factor_col_name){
     new_whereConditions = whereConditions.copy()
     new_whereConditions.append!( expr(sqlCol(factor_col_name), ==, factor_name) )
-    return sql(select=cols, from=factor_table, where=new_whereConditions).eval()
+    result = sql(select=cols, from=factor_table, where=new_whereConditions).eval()
+    return result
 }
 
 
@@ -225,10 +239,11 @@ def readFactorTable(fac_secu_name, fac_time_name, factor_col_name, fac_val_name,
     whereConditions = [expr(sqlCol(fac_time_name, date), between, startDate, :, endDate)]
     whereConditions.append!(expr(sqlCol(fac_time_name, second), between, startTime, :, endTime))
     
-    // whereConditions.append!( expr(sqlCol(factor_col_name), in, factorNames) )
-    return loop(getFactorTableByName(,cols, whereConditions, factor_table, factor_col_name), factorNames).unionAll(false)
+    whereConditions.append!( expr(sqlCol(factor_col_name), in, factorNames) )
+    // return loop(getFactorTableByName(,cols, whereConditions, factor_table, factor_col_name), factorNames).unionAll(false)
     // print(sql(select=cols, from=factor_table, where=whereConditions))
-    // return sql(select=cols, from=factor_table, where=whereConditions).eval()
+    
+    return sql(select=cols, from=factor_table, where=whereConditions).eval()
 }
 
 def formPortfolioSingleGroup(startTS, endTS, factorName, factorsTable, holdingMins, groups, groupId, reverse=false){
@@ -316,7 +331,7 @@ def evaluatePnL(portPnLTable, factorName, colName){
 
 
 def calcStockPnL(portTable, priceTable, holdingMins, endTS){
-	
+	print(select * from portTable limit 10)
 	// 收益率
 	retTable = select securityid, tradetime, ret as ret_ts from priceTable
 	
@@ -357,6 +372,8 @@ def calcStockPnL(portTable, priceTable, holdingMins, endTS){
 
 
 def calPnL(factorName, port_name, factorsTable, priceTable, startTS, endTS, window, group, hedge_flag) {
+    # print(port_name)
+    # print(select * from factorsTable where securityid = `002976 limit 10)
     if (hedge_flag) {
         portTable = formPortfolioHedge(startTS, endTS, factorName, factorsTable, holdingMins=window, groups=group)
         // stockPnl = calcStockPnL(portTable, priceTable, window, endTS)
