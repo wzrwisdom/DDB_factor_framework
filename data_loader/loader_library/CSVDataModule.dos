@@ -374,8 +374,8 @@ def renderSchemaTbFiveMinKLineChart(){
     return table(1:0, name, type)
 } 
 def renderSchemaTbFactor() {
-    col_names = `username`tradetime`securityid`factorname`value
-    col_types = [SYMBOL, TIMESTAMP, SYMBOL, SYMBOL, DOUBLE]
+    col_names = `tradetime`securityid`factorname`value
+    col_types = [TIMESTAMP, SYMBOL, SYMBOL, DOUBLE]
     return table(1:0, col_names, col_types)
 }
 
@@ -403,9 +403,9 @@ def createTableFiveMinKLineChart(dbName, tbName){
 
 def createFactorTable(dbName, tbName) {
     createPartitionedTable(dbHandle=database(dbName), table=renderSchemaTbFactor(), 
-    tableName=tbName, partitionColumns=`username`tradetime`factorname, 
-    sortColumns=`username`securityid`tradetime, compressMethods={tradetime:"delta"}, 
-    keepDuplicates=LAST, sortKeyMappingFunction=[,hashBucket{, 500}])
+    tableName=tbName, partitionColumns=`tradetime`factorname, 
+    sortColumns=`securityid`tradetime, compressMethods={tradetime:"delta"}, 
+    keepDuplicates=LAST, sortKeyMappingFunction=[hashBucket{, 500}])
 }
 
 

@@ -18,7 +18,7 @@ def createSnapCrossSec(dbName, tbName, startDate, endDate, window_size, threadNu
     codes_split_num = 10
     for (period in periods){
         // for (codes in ExtractFeatureModule::getSplittedCodes(snapDbName, snapTbName, period.head(), num=10)) {
-            jobId = ExtractFeatureModule::submitAggCrossSectionJob(dbName, tbName, 'orig_time', period.head(), period.tail(), window_size, codes_split_num, snapDbName, snapTbName, ExtractFeatureModule::doAggSnapCrossSectionForCodes, CSVDataModule::renderTransformedDataAll)
+            jobId = ExtractFeatureModule::submitAggCrossSectionJob(dbName, tbName, 'date', period.head(), period.tail(), window_size, codes_split_num, snapDbName, snapTbName, ExtractFeatureModule::doAggSnapCrossSectionForCodes, CSVDataModule::renderTransformedDataAll)
             
             jobIdlist.append!(jobId)
         // }
